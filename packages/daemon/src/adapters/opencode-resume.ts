@@ -26,6 +26,9 @@ interface OpencodeResumeOptions {
   sleep?: (ms: number) => Promise<void>;
 }
 
+/** Resume surface for an opencode seat: builds and drives the same-session
+ *  relaunch (`opencode --session <id>`) in a live pane and verifies the TUI comes
+ *  back, without any Codex-style account/home/rollout machinery. */
 export class OpencodeResumeAdapter {
   constructor(
     private tmux: TmuxAdapter,

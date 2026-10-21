@@ -169,7 +169,15 @@ describe("ClaimService FR-3 — adoption-boundary resume-token capture", () => {
     const discovered = seedDiscovery({ runtimeHint: "opencode", tmuxSession: "dev-owner@test-rig" });
 
     const result = await buildService({
-      opencodeSessionStore: { readSessionId: async () => ({ ok: true as const, sessionId: "ses_f3bb408d9ffeA9wfnyVhkcmv6C" }) },
+      // opencode capture is seat-precise: it reads the cwd-scoped store, never the
+      // global-newest reader (which could pick another seat's session).
+      opencodeSessionStore: {
+        readSessionId: async () => ({ ok: false as const, reason: "missing_sidecar" }),
+        readSessionIdForCwd: async (cwd: string | null) => {
+          expect(cwd).toBe("/projects/app");
+          return { ok: true as const, sessionId: "ses_f3bb408d9ffeA9wfnyVhkcmv6C" };
+        },
+      },
     }).bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "dev.owner" });
     expect(result.ok).toBe(true);
 

@@ -30,8 +30,9 @@ const CHILD_ID = "ses_aaaaaaaaaaaaaaaaaaaaaaaaAA";
 const OPENCODE_FLOOR_EFFECT = {
   runtime: "opencode",
   axis: "permission",
-  state: "observed",
-  value: "default",
+  state: "unknown",
+  value: null,
+  reason: "delegated_to_agent_profile",
 } as const;
 
 function mockTmux(overrides?: {
@@ -154,10 +155,14 @@ describe("opencode approval posture", () => {
     expect(opencodePostureFlag({}, "full_bypass")).toBe(" --auto");
   });
 
-  it("observes the posture for the applied-launch record", () => {
-    expect(observeOpencodeApproval("")).toEqual(OPENCODE_FLOOR_EFFECT);
-    expect(observeOpencodeApproval(" --auto")).toEqual({ runtime: "opencode", axis: "permission", state: "observed", value: "autoApprove" });
-    expect(observeOpencodeApproval("--bogus").state).toBe("unknown");
+  it("records the opencode posture honestly as profile-delegated, never as an emitted flag", () => {
+    // No fresh/resume/fork opencode command emits a permission flag, so the
+    // applied-launch record must not claim an observed posture regardless of the
+    // resolved posture segment.
+    const expected = { runtime: "opencode", axis: "permission", state: "unknown", value: null, reason: "delegated_to_agent_profile" } as const;
+    expect(observeOpencodeApproval("")).toEqual(expected);
+    expect(observeOpencodeApproval(" --auto")).toEqual(expected);
+    expect(observeOpencodeApproval("--bogus")).toEqual(expected);
   });
 });
 
@@ -586,27 +591,27 @@ describe("OpencodeResumeAdapter", () => {
 // ── capture + preflight touch points ────────────────────────────────────────
 
 describe("opencode capture and preflight", () => {
-  it("derives opencode tokens from the session store; noop without the dep", async () => {
-    const noop = await deriveResumeToken({ runtime: "opencode", sessionName: SESSION }, {});
+  it("derives opencode tokens from the cwd-scoped store; noop without the dep", async () => {
+    const noop = await deriveResumeToken({ runtime: "opencode", sessionName: SESSION, cwd: "/work" }, {});
     expect(noop).toEqual({ outcome: "noop" });
 
-    const captured = await deriveResumeToken({ runtime: "opencode", sessionName: SESSION }, {
-      opencodeSessionStore: { readSessionId: async () => ({ ok: true, sessionId: SESSION_ID }) },
+    const captured = await deriveResumeToken({ runtime: "opencode", sessionName: SESSION, cwd: "/work" }, {
+      opencodeSessionStore: { readSessionIdForCwd: async () => ({ ok: true, sessionId: SESSION_ID }) },
     });
     expect(captured).toEqual({ outcome: "captured", resumeType: "opencode_session_id", token: SESSION_ID });
 
-    const missing = await deriveResumeToken({ runtime: "opencode", sessionName: SESSION }, {
-      opencodeSessionStore: { readSessionId: async () => ({ ok: false, reason: "missing_sidecar" }) },
+    const missing = await deriveResumeToken({ runtime: "opencode", sessionName: SESSION, cwd: "/work" }, {
+      opencodeSessionStore: { readSessionIdForCwd: async () => ({ ok: false, reason: "missing_sidecar" }) },
     });
     expect(missing).toEqual({ outcome: "skipped", reason: "missing_sidecar" });
 
-    const invalid = await deriveResumeToken({ runtime: "opencode", sessionName: SESSION }, {
-      opencodeSessionStore: { readSessionId: async () => ({ ok: true, sessionId: "bad id!!" }) },
+    const invalid = await deriveResumeToken({ runtime: "opencode", sessionName: SESSION, cwd: "/work" }, {
+      opencodeSessionStore: { readSessionIdForCwd: async () => ({ ok: true, sessionId: "bad id!!" }) },
     });
     expect(invalid).toEqual({ outcome: "skipped", reason: "invalid_token" });
   });
 
-  it("derive prefers the cwd-scoped read when the caller knows the seat cwd", async () => {
+  it("derive uses ONLY the cwd-scoped read and skips honestly without a cwd (no global fallback)", async () => {
     const readSessionId = vi.fn(async () => ({ ok: true as const, sessionId: "ses_global" }));
     const readSessionIdForCwd = vi.fn(async (cwd: string | null) => {
       expect(cwd).toBe("/work");
@@ -618,11 +623,13 @@ describe("opencode capture and preflight", () => {
     expect(scoped).toEqual({ outcome: "captured", resumeType: "opencode_session_id", token: SESSION_ID });
     expect(readSessionId).not.toHaveBeenCalled();
 
-    const fallback = await deriveResumeToken({ runtime: "opencode", sessionName: SESSION }, {
+    // Without a seat cwd there is no seat-precise read; a global-newest token could
+    // resume the WRONG conversation in a shared-HOME store, so skip honestly.
+    const noCwd = await deriveResumeToken({ runtime: "opencode", sessionName: SESSION }, {
       opencodeSessionStore: { readSessionId, readSessionIdForCwd },
     });
-    expect(fallback).toEqual({ outcome: "captured", resumeType: "opencode_session_id", token: "ses_global" });
-    expect(readSessionId).toHaveBeenCalledOnce();
+    expect(noCwd).toEqual({ outcome: "skipped", reason: "missing_sidecar" });
+    expect(readSessionId).not.toHaveBeenCalled();
   });
 
   it("the adapter readSessionId feeds the capture store shape", async () => {

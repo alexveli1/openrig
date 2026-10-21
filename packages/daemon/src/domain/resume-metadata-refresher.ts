@@ -489,6 +489,9 @@ export class ResumeMetadataRefresher {
 // Exported for unit test (B12-T): the REAL async sampling path — the anti-vacuity test drives
 // this default directly (every other suite injects sync stubs) and asserts the non-blocking
 // property that the pre-B12 sync implementation violated.
+/** Snapshot the host process table (`pid`, `ppid`, `command`) once, for the
+ *  in-place-restart process matcher. Read-only; returns an empty array when the
+ *  table cannot be read (callers treat that as an unreadable pane, not a match). */
 export async function defaultListProcesses(): Promise<Array<{ pid: number; ppid: number; command: string }>> {
   try {
     return await defaultListProcessesStrict();

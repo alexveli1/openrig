@@ -780,6 +780,7 @@ export class SeatHandoverService {
         sessionId: committed.result.newSessionId,
         sessionName: discovered.tmuxSession,
         runtime: input.node.runtime,
+        cwd: input.node.cwd ?? null,
       });
     }
     return committed;
@@ -793,11 +794,11 @@ export class SeatHandoverService {
    * nothing + a redacted skip event. NEVER throws, never logs the token.
    */
   private async captureDiscoveredResumeToken(input: {
-    rigId: string; nodeId: string; sessionId: string; sessionName: string; runtime: string | null;
+    rigId: string; nodeId: string; sessionId: string; sessionName: string; runtime: string | null; cwd: string | null;
   }): Promise<void> {
     try {
       const derived = await deriveResumeToken(
-        { runtime: input.runtime, sessionName: input.sessionName },
+        { runtime: input.runtime, sessionName: input.sessionName, cwd: input.cwd },
         this.captureDeps,
       );
       if (derived.outcome === "exempt" || derived.outcome === "noop") return;

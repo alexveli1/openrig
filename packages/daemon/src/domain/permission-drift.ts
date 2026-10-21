@@ -114,14 +114,23 @@ export function observeOmpApprovalMode(arg: string): AppliedLaunchObservation {
   return { runtime: "omp", axis: "permission", state: "unknown", value: null, reason: "unrecognized_launch_argument" };
 }
 
-export function observeOpencodeApproval(postureArg: string): AppliedLaunchObservation {
-  if (postureArg.trim() === "--auto") {
-    return { runtime: "opencode", axis: "permission", state: "observed", value: "autoApprove" };
-  }
-  if (postureArg.trim() === "") {
-    return { runtime: "opencode", axis: "permission", state: "observed", value: "default" };
-  }
-  return { runtime: "opencode", axis: "permission", state: "unknown", value: null, reason: "unrecognized_launch_argument" };
+export function observeOpencodeApproval(_postureArg: string): AppliedLaunchObservation {
+  // opencode approval is delegated to the per-seat agent profile
+  // (`permission: {"*":"allow"}` in the seat's opencode.json), NOT emitted as a
+  // launch-argument flag on any fresh / resume / fork command (no `--auto` on the
+  // command line — see the opencode-runtime-adapter header). Launch arguments
+  // therefore carry no authoritative signal about the effective permission
+  // posture. Record it honestly as not-observed-from-args rather than claiming an
+  // `autoApprove`/`default` posture that was never actually emitted, which would
+  // make the drift tooling believe a flag enforced an approval that the profile
+  // alone is responsible for.
+  return {
+    runtime: "opencode",
+    axis: "permission",
+    state: "unknown",
+    value: null,
+    reason: "delegated_to_agent_profile",
+  };
 }
 
 function runtimeCommand(runtime: string): string | null {

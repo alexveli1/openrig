@@ -1150,6 +1150,19 @@ function printEffortReport(data: Record<string, unknown>): void {
 
 function printRestartReport(data: Record<string, unknown>): void {
   const seat = data["seat"] as { logicalId?: string; rigName?: string } | undefined;
+  // opencode reports carry no Codex conversation-proof / activity / account / peer fields.
+  // Branch on their absence so an opencode restart (or --plan) prints only the fields it has
+  // instead of throwing on Codex-only reads. `activity` is always present on a Codex report.
+  if (data["activity"] === undefined) {
+    const outcome = data["outcome"] ? String(data["outcome"]) : "preview";
+    console.log(`${outcome}: ${seat?.logicalId ? `${seat.logicalId}@${seat.rigName} ` : ""}pane ${String(data["pane"])} (${String(data["paneShape"])}).`);
+    console.log(String(data["message"]));
+    const held = data["paneHeld"] as { previous?: string | null } | undefined;
+    if (held) console.log(`Pane held (remain-on-exit on)${held.previous ? `, previously ${held.previous}` : ""}.`);
+    if (data["recoveryCommand"]) console.log(`Recovery command: ${String(data["recoveryCommand"])}`);
+    for (const warning of (data["warnings"] as string[] | undefined) ?? []) console.log(`Warning: ${warning}`);
+    return;
+  }
   console.log(`${data["outcome"] ? String(data["outcome"]) : "preview"}: ${seat?.logicalId}@${seat?.rigName} (${String(data["sessionName"])}, pane ${String(data["pane"])}, ${String(data["paneShape"])}).`);
   console.log(String(data["message"]));
   console.log(`Conversation: ${String(data["conversationId"])} (proved by ${String(data["conversationProof"])}).`);

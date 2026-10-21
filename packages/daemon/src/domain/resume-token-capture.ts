@@ -131,13 +131,15 @@ export async function deriveResumeToken(
     else return { outcome: "skipped", reason: "missing_sidecar" };
   } else if (runtime === "opencode") {
     if (!deps.opencodeSessionStore) return { outcome: "noop" }; // dep absent — silent no-op
-    // Prefer the cwd-scoped read when the caller knows the seat cwd: rows
-    // key on directory, so multi-seat rigs sharing a HOME store stay
-    // seat-precise. Without a cwd, fall back to the global-newest read.
-    const scoped = input.cwd ? deps.opencodeSessionStore.readSessionIdForCwd : undefined;
-    const state = scoped
-      ? await scoped.call(deps.opencodeSessionStore, input.cwd ?? null)
-      : await deps.opencodeSessionStore.readSessionId(input.sessionName);
+    // opencode session rows key on directory. The only seat-precise read is the
+    // cwd-scoped one; a multi-seat rig sharing a HOME store can otherwise pick a
+    // different seat's newest row and resume the WRONG conversation. So require
+    // the cwd: without it there is no safe read, and an honest skip beats a
+    // possibly-wrong global-newest token.
+    if (!input.cwd) return { outcome: "skipped", reason: "missing_sidecar" };
+    const readScoped = deps.opencodeSessionStore.readSessionIdForCwd;
+    if (!readScoped) return { outcome: "noop" }; // store lacks the seat-precise reader — silent no-op
+    const state = await readScoped.call(deps.opencodeSessionStore, input.cwd);
     if (!state.ok) {
       return { outcome: "skipped", reason: state.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
     }

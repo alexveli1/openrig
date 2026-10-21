@@ -196,20 +196,17 @@ export const CODEX_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
 };
 
 /** Activity evidence for the opencode runtime (P-019, 2026-10-11, PO-approved).
- *  opencode is a direct-CLI TUI runtime (no harness-in-a-pane shim), so the two
- *  rungs are:
- *   - `lifecycle-hooks`: the adapter types CLI commands straight into the seat
- *     pane; each launch command is a lifecycle event the daemon can attribute.
- *   - `window-sampling`: periodic tmux-pane capture samples the live TUI to
- *     detect activity between lifecycle events.
- *  Both are `full`/`authoritative`: the daemon controls both signals end to
- *  end (it types the commands and owns the capture) — no external attester
- *  needed. */
+ *  The opencode adapter records no activity/lifecycle telemetry of its own, so
+ *  there is no producer for a `lifecycle-hooks` rung and none is declared (a
+ *  declared rung with no producer would let the ladder trust a signal that never
+ *  arrives). opencode is a direct-CLI TUI runtime (no harness-in-a-pane shim); its
+ *  liveness is decided by `window-sampling`: periodic tmux-pane capture samples the
+ *  live TUI. The daemon owns that capture end to end, so it is full / authoritative
+ *  with no external attester. */
 export const OPENCODE_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
   adapterId: "opencode-activity-hook",
   runtime: "opencode",
   rungs: [
-    { rung: "lifecycle-hooks", lifecycleCoverage: "full", initialTrust: "authoritative" },
     { rung: "window-sampling", lifecycleCoverage: "full", initialTrust: "authoritative" },
   ],
 };

@@ -62,6 +62,10 @@ export interface OpencodeRestartReport {
   message: string;
   paneHeld?: { option: "remain-on-exit"; value: "on"; previous: string | null };
   warnings?: string[];
+  /** Required restart reason (carried for audit, mirrors the Codex restart path's `--reason`). */
+  reason?: string;
+  /** Requesting operator (carried for audit, mirrors the Codex restart path's `--operator`). */
+  operator?: string | null;
 }
 
 export type OpencodeRestartResult = OpencodeRestartReport | OpencodeRestartRefusal;
@@ -120,7 +124,7 @@ export class OpencodeInPlaceRestart {
 
   /** The full same-session relaunch: resolve the running opencode, stop it, relaunch its own session, verify.
    *  With `opts.plan`, stop after the read-only checks (before any signal) and preview the relaunch. */
-  async execute(target: OpencodeRestartTarget, opts: { plan?: boolean } = {}): Promise<OpencodeRestartResult> {
+   async execute(target: OpencodeRestartTarget, opts: { plan?: boolean; reason?: string; operator?: string | null } = {}): Promise<OpencodeRestartResult> {
     const { sessionName, seat } = target;
     const pane = target.binding.tmuxPane;
     const cwd = target.binding.cwd;
@@ -162,14 +166,20 @@ export class OpencodeInPlaceRestart {
     if (!relaunch.ok) {
       return { ok: false, code: "relaunch_unavailable", message: `The resume command could not be built: ${relaunch.error}. Nothing was stopped.` };
     }
+    // Audit context (required reason + requesting operator) rides every report,
+    // mirroring the Codex restart path so the CLI output records who restarted and why.
+    const audit: Pick<OpencodeRestartReport, "reason" | "operator"> = {
+      ...(opts.reason ? { reason: opts.reason } : {}),
+      ...(opts.operator != null ? { operator: opts.operator } : {}),
+    };
     if (opts.plan) {
-      return { ok: true, outcome: "planned", pane, paneShape, recoveryCommand: relaunch.core,
+      return { ok: true, outcome: "planned", pane, paneShape, recoveryCommand: relaunch.core, ...audit,
         message: `Ready to relaunch opencode in place on session ${target.resumeToken} (pane shape: ${paneShape}); nothing was stopped.` };
     }
 
     return paneShape === "shell_backed"
-      ? this.restartShellBacked(target, pane, panePid, client.pid, relaunch.command, relaunch.core)
-      : this.restartDirectNative(target, pane, relaunch.command, relaunch.core, cwd);
+      ? this.restartShellBacked(target, pane, panePid, client.pid, relaunch.command, relaunch.core, audit)
+      : this.restartDirectNative(target, pane, relaunch.command, relaunch.core, cwd, audit);
   }
 
   /** The pane runs a shell with opencode as its child: TERM/KILL the opencode client only, the shell
@@ -177,22 +187,23 @@ export class OpencodeInPlaceRestart {
   private async restartShellBacked(
     target: OpencodeRestartTarget, pane: string, panePid: number, clientPid: number,
     command: string, core: string,
+    audit: Pick<OpencodeRestartReport, "reason" | "operator"> = {},
   ): Promise<OpencodeRestartResult> {
     const stopped = await this.stopUnderShell(pane, panePid, clientPid);
     if (stopped === "running") {
-      return { ok: true, outcome: "not_started", pane, paneShape: "shell_backed", recoveryCommand: core,
+      return { ok: true, outcome: "not_started", pane, paneShape: "shell_backed", recoveryCommand: core, ...audit,
         message: "The opencode client did not exit after TERM and KILL; nothing was relaunched and the original process is still running." };
     }
     if (stopped === "unknown") {
-      return { ok: true, outcome: "unknown", pane, paneShape: "shell_backed", recoveryCommand: core,
+      return { ok: true, outcome: "unknown", pane, paneShape: "shell_backed", recoveryCommand: core, ...audit,
         message: "Signals were sent, but the pane could not be observed afterwards; no relaunch was attempted." };
     }
     const launch = await this.deps.opencode.sendResumeCommand(target.sessionName, command, target.resumeToken);
     if (!launch.ok) {
-      return { ok: true, outcome: "incomplete", pane, paneShape: "shell_backed", recoveryCommand: core,
+      return { ok: true, outcome: "incomplete", pane, paneShape: "shell_backed", recoveryCommand: core, ...audit,
         message: `The opencode client was stopped but the relaunch did not verify: ${launch.error}. Run the recovery command in the pane to resume by hand.` };
     }
-    return { ok: true, outcome: "restarted", pane, paneShape: "shell_backed", recoveryCommand: core,
+    return { ok: true, outcome: "restarted", pane, paneShape: "shell_backed", recoveryCommand: core, ...audit,
       message: "The opencode seat was relaunched in place on its own session; it re-read its seat config." };
   }
 
@@ -200,6 +211,7 @@ export class OpencodeInPlaceRestart {
    *  pane with the resume command, verify the TUI, then restore the pane's remain-on-exit setting. */
   private async restartDirectNative(
     target: OpencodeRestartTarget, pane: string, command: string, core: string, cwd: string,
+    audit: Pick<OpencodeRestartReport, "reason" | "operator"> = {},
   ): Promise<OpencodeRestartResult> {
     const prior = (await this.deps.tmux.getPaneLocalOption(pane, "remain-on-exit")) ?? null;
     const set = await this.deps.tmux.setRemainOnExit(pane, true);
@@ -214,23 +226,23 @@ export class OpencodeInPlaceRestart {
     const terminated: PaneTerminationResult = await terminatePaneInPlace(this.deps.tmux, pane, this.timing, "opencode");
     if (!terminated.ok) {
       await this.restoreRemainOnExit(pane, prior);
-      return { ok: true, outcome: "not_started", pane, paneShape: "direct_native", recoveryCommand: core, paneHeld,
+      return { ok: true, outcome: "not_started", pane, paneShape: "direct_native", recoveryCommand: core, paneHeld, ...audit,
         message: `The opencode client could not be terminated in place (${terminated.message}); the pane was held and restored, nothing was relaunched.` };
     }
     const respawned = await this.deps.tmux.respawnPane(pane, command, { cwd });
     if (!respawned.ok) {
       await this.restoreRemainOnExit(pane, prior);
-      return { ok: true, outcome: "not_started", pane, paneShape: "direct_native", recoveryCommand: core, paneHeld,
+      return { ok: true, outcome: "not_started", pane, paneShape: "direct_native", recoveryCommand: core, paneHeld, ...audit,
         message: `The pane was terminated but could not be respawned (${respawned.message}); run the recovery command to resume by hand.` };
     }
     const launch = await this.deps.opencode.verifyResumeInPane(target.sessionName, target.resumeToken);
     if (!launch.ok) {
       await this.restoreRemainOnExit(pane, prior);
-      return { ok: true, outcome: "incomplete", pane, paneShape: "direct_native", recoveryCommand: core, paneHeld,
+      return { ok: true, outcome: "incomplete", pane, paneShape: "direct_native", recoveryCommand: core, paneHeld, ...audit,
         message: `The opencode client was restarted but the resume did not verify: ${launch.error}. Run the recovery command in the pane to resume by hand.` };
     }
     const restored = await this.restoreRemainOnExit(pane, prior);
-    return { ok: true, outcome: "restarted", pane, paneShape: "direct_native", recoveryCommand: core,
+    return { ok: true, outcome: "restarted", pane, paneShape: "direct_native", recoveryCommand: core, ...audit,
       ...(restored ? {} : { paneHeld, warnings: ["remain-on-exit could not be restored to its previous value."] }),
       message: "The opencode seat was relaunched in place on its own session; it re-read its seat config." };
   }

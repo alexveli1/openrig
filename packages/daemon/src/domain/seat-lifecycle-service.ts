@@ -1470,7 +1470,7 @@ export class SeatLifecycleService {
       const run = async (): Promise<RestartInPlaceResult> => {
         const target = await this.inPlaceTarget(resolved, input.seatRef);
         if ("code" in target) return target;
-        return opencode.execute(this.toOpencodeTarget(target), { plan: input.plan });
+        return opencode.execute(this.toOpencodeTarget(target), { plan: input.plan, reason: input.reason, operator: input.operator ?? null });
       };
       const ocGuard = this.tmuxAdapter.deliveryGuard;
       return ocGuard && !ocGuard.ownsLifecycle(resolved.nodeId) ? ocGuard.lifecycle([resolved.nodeId], run) : run();
