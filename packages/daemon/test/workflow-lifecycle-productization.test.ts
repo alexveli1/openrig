@@ -654,12 +654,14 @@ describe("S06 lifecycle productization", () => {
     });
     expect(swept.keepalivesArmed).toBe(2);
     expect(swept.lostNudgeRecoveryAttempts).toBe(2);
+    await queueRepo.drainPendingWakeIntents(); // production startup drains after the workflow sweep
     expect(sentNudges.sort()).toEqual(["left@rig", "right@rig"]);
     for (const packet of [left, right]) {
       expect(new OutboxHandler(db).getById(`${WAKE_INTENT_PREFIX}${packet.packetId}`)?.deliveryState).toBe("delivered");
     }
     sentNudges = [];
     await runWorkflowBootSweep({ instanceStore: runtime.instanceStore, queueRepo, watchdogJobsRepo: watchdogRepo });
+    await queueRepo.drainPendingWakeIntents();
     expect(sentNudges).toEqual([]);
 
     await runtime.project({ instanceId: created.instance.instanceId, currentPacketId: left.packetId, exit: "done", actorSession: "left@rig" });

@@ -75,3 +75,21 @@ export async function resolveRigHandle(client: DaemonClient, handle: string): Pr
   }
   return { kind: "not_found", handle };
 }
+
+/**
+ * The rig id for a read or snapshot command given a rig name or id: the id a name resolves to, or the
+ * handle itself when it matches no rig or the rig list can't be read (the daemon then answers for that
+ * exact id, as before). `known` is false only when the rig list was read and no rig matched. An ambiguous
+ * name stops the command with the candidate ids.
+ */
+export async function rigIdForHandle(
+  client: DaemonClient,
+  handle: string,
+): Promise<{ ok: true; id: string; known: boolean } | { ok: false; message: string }> {
+  const resolution = await resolveRigHandle(client, handle);
+  if (resolution.kind === "ambiguous") {
+    return { ok: false, message: `'${handle}' matches ${resolution.ids.length} rigs (${resolution.ids.join(", ")}). Nothing was done; pass one of these ids instead.` };
+  }
+  if (resolution.kind === "resolved") return { ok: true, id: resolution.id, known: true };
+  return { ok: true, id: handle, known: resolution.kind === "passthrough" };
+}

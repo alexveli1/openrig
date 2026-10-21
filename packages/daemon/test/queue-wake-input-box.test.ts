@@ -283,15 +283,7 @@ describe("a queue wake keeps its input-box reading (#1278)", () => {
       expect(row.lastNudgeInputBox).toEqual(BUSY_SEAT);
     }
 
-    // An indeterminate wake is terminal to the drain; diagnostics must not introduce a retry.
-    expect(await h.repo.drainPendingWakeIntents()).toEqual({ delivered: 0, indeterminate: 0, failed: 0, retained: 0 });
-    expect(h.sent).toHaveLength(1);
-
-    // Synthetically re-arm the intents to exercise a newer coalesced attempt without a reading.
-    // This is fixture setup, not production retry policy: the drain above did not re-arm them.
-    for (const id of ids) {
-      h.db.prepare("UPDATE outbox_entries SET delivery_state = 'pending' WHERE outbox_id = ?").run(`wake-intent-${id}`);
-    }
+    // The next recovery pass makes a fresh attempt; its reading replaces the previous attempt's.
     h.results.push({ ok: true, verified: true });
     expect(await h.repo.drainPendingWakeIntents()).toEqual({ delivered: 1, indeterminate: 0, failed: 0, retained: 0 });
     expect(h.sent).toHaveLength(2);

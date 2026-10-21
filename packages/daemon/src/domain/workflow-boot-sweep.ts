@@ -143,10 +143,9 @@ export async function runWorkflowBootSweep(
       // Recovery above already owns this boot's attempt, including an uncertain
       // or held original. An overdue verdict must not bypass that outcome.
       if (!recoveredPackets.has(verdict.evidence.packetId)) {
-        await deps.queueRepo.maybeNudge(
+        await deps.queueRepo.recoverLostNudge(
           verdict.evidence.packetId,
           verdict.evidence.ownerSession,
-          undefined,
           instance.createdBySession,
         );
       }

@@ -258,7 +258,8 @@ describe("custody of asks held for quiet hours", () => {
     expect(String((repo.waitingView(row.qitemId)!.nextBackstop as { note?: string }).note)).toMatch(/^Released when quiet ended, but its post failed \(/);
     const r = await sweep();
     expect(findingFor(r, row)).toHaveLength(1);
-    expect(undeliveredFor(r, row)).toHaveLength(1);
+    expect(findingFor(r, row)[0]!.kind).toBe("undelivered-human-notice");
+    expect(repo.getById(findingFor(r, row)[0]!.findingQitemId)?.destinationSession).toBe("asker@r");
     expect(findingWhy(row)).toMatch(/released after quiet hours; its post failed \(.+\); the release stays queued for redelivery/);
     await ladder();
     expect(ladderTouched(row), "a failed release is an ordinary failed delivery to the ladder").toBe(true);
@@ -293,7 +294,8 @@ describe("custody of asks held for quiet hours", () => {
     expect(quietHoldCustody(db, row.qitemId)).toMatchObject({ state: "release-failed" });
     const r = await sweep();
     expect(findingFor(r, row)).toHaveLength(1);
-    expect(undeliveredFor(r, row)).toHaveLength(1);
+    expect(findingFor(r, row)[0]!.kind).toBe("undelivered-human-notice");
+    expect(repo.getById(findingFor(r, row)[0]!.findingQitemId)?.destinationSession).toBe("asker@r");
   });
 
   it("QA F1: a release turned back by quiet, with a failed wake, gives no undelivered-wake finding", async () => {

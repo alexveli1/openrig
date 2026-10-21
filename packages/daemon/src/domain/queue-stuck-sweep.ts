@@ -22,7 +22,7 @@ import { resolvePickupThresholdMinutes } from "./queue-pickup.js";
 // created-with-destination obligations (S01's baton filter excludes them; the unclaimed
 // net below sweeps them). S01 imports the marker vocabulary from HERE so the two slices
 // share one contract instead of two guesses. S03 owns park/wake honesty: state=blocked rows
-// legitimately wait and are never findings.
+// legitimately wait; only an undelivered human notice is a delivery finding.
 
 import { defaultResolveOrchestrator } from "./queue-owner.js";
 import type Database from "better-sqlite3";
@@ -53,6 +53,7 @@ export type StuckFindingKind =
   | "overdue-claim"
   | "stalled-after-claim"
   | "undelivered-wake"
+  | "undelivered-human-notice"
   | "unclaimed-obligation"
   | "dangling-closure";
 
@@ -444,23 +445,35 @@ export async function runStuckSweep(deps: StuckSweepDeps): Promise<StuckSweepRes
     // here exactly once (the dedup tag keeps it to one finding).
     for (const row of deps.queueRepo.findUndelivered()) {
       if (isFindingRow(row)) continue;
-      if (hasLiveLadder(deps.db, row.qitemId)) continue;
+      const humanNotice = row.deliveryOutcome === "never-posted" || row.deliveryOutcome === "transport-failed";
+      // Agent wake retries do not own the separate notice to a person.
+      if (!humanNotice && hasLiveLadder(deps.db, row.qitemId)) continue;
+      const notification = humanNotice ? deps.queueRepo.transitionLog.latestOwnerNotificationForQitem(row.qitemId) : null;
+      const resolutionNotice = notification?.ownerNotificationKind === "human-decision-resolved";
+      // Match the notification source in slack/queue-access.ts, not the agent wake's escalator.
+      const noticeOwner = row.state === "blocked" || resolutionNotice ? row.destinationSession : row.sourceSession;
+      const noticeRecipient = resolutionNotice ? notification.actorSession : row.state === "blocked" ? row.blockedOn : row.destinationSession;
+      const failure = humanNotice
+        ? `human notice ${row.deliveryOutcome} to ${noticeRecipient}: ${row.deliveryFailureDetail}`
+        : `wake failed (${row.lastNudgeResult ?? "failed"})`;
       // Quiet hours: a held, turned-back or released ask belongs to its window's release job, so a failed wake, or a post
       // not yet made, isn't "nothing retried it". A release whose post failed is a failed delivery, and a hold with no
       // live release job is orphaned: both stay findings, with their own reason.
       const quiet = quietHoldCustody(deps.db, row.qitemId, now);
       if (quiet && (quiet.state === "held" || quiet.state === "released")) continue;
       candidates.push({
-        kind: "undelivered-wake",
+        kind: humanNotice ? "undelivered-human-notice" : "undelivered-wake",
         row,
-        route: resolveOrch(row.destinationSession) ?? row.destinationSession,
+        route: humanNotice ? noticeOwner : resolveOrch(row.destinationSession) ?? row.destinationSession,
         ageMinutes: minutesSince(row.tsCreated, now),
         evidenceAt: latestIso(row.tsUpdated, row.lastNudgeAttempt),
         why: quiet?.state === "orphaned"
-          ? `held for quiet hours (window ${quiet.windowId}), but no release job is live for that window: nothing will release it (its wake failed: ${row.lastNudgeResult ?? row.deliveryFailureClass ?? "failed"})`
+          ? `held for quiet hours (window ${quiet.windowId}), but no release job is live for that window: nothing will release it (${failure})`
           : quiet?.state === "release-failed"
             ? `released after quiet hours; its post failed (${quiet.failure}); the release stays queued for redelivery`
-            : `wake failed (${row.lastNudgeResult ?? "failed"}) and nothing retried it`,
+            : humanNotice
+              ? `${failure}; check human-notification delivery rather than retrying the agent wake`
+              : `${failure} and nothing retried it`,
       });
     }
 

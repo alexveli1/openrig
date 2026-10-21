@@ -259,6 +259,111 @@ describe("current draft-aware delivery through the real transport", () => {
 });
 
 describe("supported seat and queue integration", () => {
+  it.each(["failed", "indeterminate", "sending"])("startup recovery attempts a still-current %s queue wake", async state => {
+    const f = fixture(); await f.enable();
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
+    f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
+    const id = "wake-intent-" + item.qitemId;
+    const original = f.outbox.getById(id)!;
+    f.db.prepare("UPDATE outbox_entries SET delivery_state=? WHERE outbox_id=?").run(state, id);
+    const reopened = fixture(f.db.serialize());
+    reopened.repo.reconcileAbandonedWakeIntents();
+    await reopened.repo.drainPendingWakeIntents();
+    expect(reopened.submissions).toHaveLength(1);
+    expect(reopened.submissions[0]).toContain(original.body);
+    expect(reopened.submissions[0]).toMatch(/may (?:repeat|be repeated)/i);
+    expect(reopened.outbox.getById(id)!.body).toBe(original.body);
+    expect(reopened.outbox.getById(id)!.deliveryState).toBe("delivered");
+    expect(reopened.repo.getById(item.qitemId)!.state).toBe("pending");
+    expect(reopened.db.prepare("SELECT count(*) AS n FROM queue_items").get()).toEqual({ n: 1 });
+    expect(reopened.bodies.b).toBe("");
+    await reopened.repo.drainPendingWakeIntents();
+    expect(reopened.submissions).toHaveLength(1);
+  });
+
+  it.each(["delivered", "retained", "retired"])("startup recovery leaves a %s queue wake alone", async state => {
+    const f = fixture(); await f.enable();
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
+    f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
+    const id = "wake-intent-" + item.qitemId;
+    f.db.prepare("UPDATE outbox_entries SET delivery_state=? WHERE outbox_id=?").run(state, id);
+    const reopened = fixture(f.db.serialize());
+    reopened.repo.reconcileAbandonedWakeIntents();
+    await reopened.repo.drainPendingWakeIntents();
+    expect(reopened.writes).toEqual([]);
+    expect(reopened.outbox.getById(id)!.deliveryState).toBe(state);
+  });
+
+  it.each(["closed", "claimed", "reassigned", "absent-pane", "replacement"].flatMap(state =>
+    [false, true].map(draftAware => ({ state, draftAware }))))("recovery does not paste for $state work (draft-aware: $draftAware)", async ({ state, draftAware }) => {
+    const f = fixture(); if (draftAware) await f.enable();
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
+    f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
+    const id = "wake-intent-" + item.qitemId;
+    f.db.prepare("UPDATE outbox_entries SET delivery_state='indeterminate' WHERE outbox_id=?").run(id);
+    if (state === "closed") f.db.prepare("UPDATE queue_items SET state='done' WHERE qitem_id=?").run(item.qitemId);
+    if (state === "claimed") f.repo.claim({ qitemId: item.qitemId, destinationSession: "worker@test" });
+    if (state === "reassigned") f.db.prepare("UPDATE queue_items SET destination_session='sibling@test' WHERE qitem_id=?").run(item.qitemId);
+    if (state === "absent-pane") f.db.prepare("UPDATE sessions SET status='exited' WHERE node_id='a'").run();
+    if (state === "replacement") f.db.exec("INSERT INTO occupant_tenures(id,node_id,generation_ordinal,generation_uuid,kind) VALUES ('next-a','a',2,'replacement-a','fresh')");
+    const reopened = fixture(f.db.serialize());
+    if (state === "absent-pane") vi.mocked(reopened.tmux.probeSession).mockResolvedValue({ state: "absent" });
+    reopened.repo.reconcileAbandonedWakeIntents();
+    await reopened.repo.drainPendingWakeIntents();
+    expect(reopened.writes).toEqual([]);
+  });
+
+  it("tries a failed recovery once per pass even when the native result stays unknown", async () => {
+    const f = fixture(); await f.enable();
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "queued work", nudge: false });
+    f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
+    const id = "wake-intent-" + item.qitemId;
+    f.db.prepare("UPDATE outbox_entries SET delivery_state='indeterminate' WHERE outbox_id=?").run(id);
+    let attempts = 0;
+    f.hooks.paste = () => { attempts++; throw new Error("native result unavailable"); };
+    await f.repo.drainPendingWakeIntents();
+    expect(attempts).toBe(1);
+    expect(f.outbox.getById(id)!.deliveryState).toBe("indeterminate");
+    expect(f.repo.getById(item.qitemId)!.lastNudgeWireResult).toMatch(/^indeterminate:/);
+  });
+
+  it("keeps earlier uncertainty when a recovery fails before input", async () => {
+    const f = fixture();
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "work", nudge: false });
+    const id = "wake-intent-" + item.qitemId;
+    f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
+    f.db.prepare("UPDATE outbox_entries SET delivery_state='indeterminate' WHERE outbox_id=?").run(id);
+    vi.spyOn(f.tmux, "probeSession").mockResolvedValue({ state: "absent" });
+    expect(await f.repo.drainPendingWakeIntents()).toMatchObject({ indeterminate: 1, failed: 0 });
+    expect(f.writes).toEqual([]);
+    expect(f.outbox.getById(id)!.deliveryState).toBe("indeterminate");
+    expect(f.repo.getById(item.qitemId)!.lastNudgeWireResult).toMatch(/^indeterminate:/);
+  });
+
+  it("does not describe an earlier attempt for a never-attempted pending wake", async () => {
+    const f = fixture();
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "work", nudge: false });
+    f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
+    await f.repo.drainPendingWakeIntents();
+    expect(f.submissions).toHaveLength(1);
+    expect(f.submissions[0]).not.toContain("earlier unconfirmed attempt");
+  });
+
+  it("reads current recovery candidates without visiting historical uncertain notifications", async () => {
+    const f = fixture();
+    const old = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "old work", nudge: false });
+    f.db.prepare("UPDATE queue_items SET state='done' WHERE qitem_id=?").run(old.qitemId);
+    f.db.transaction(() => { for (let i = 0; i < 600; i++) f.outbox.record({ outboxId: `wake-intent-history-${i}`, senderSession: "sender@test", destinationSession: "worker@test", body: "historical", auditPointer: old.qitemId }); })();
+    f.db.exec("UPDATE outbox_entries SET delivery_state='indeterminate' WHERE outbox_id LIKE 'wake-intent-history-%'");
+    const item = await f.repo.create({ sourceSession: "sender@test", destinationSession: "worker@test", body: "current work", nudge: false });
+    f.repo.stageWakeIntent(item.qitemId, "sender@test", "worker@test", null, true);
+    const reads = vi.spyOn(f.outbox, "getById");
+    await f.repo.drainPendingWakeIntents();
+    expect(f.submissions).toHaveLength(1);
+    expect(f.submissions[0]).toContain(item.qitemId);
+    expect(reads.mock.calls.length).toBeLessThan(10);
+  });
+
   it.each(["draft_input_changed", "delivery_indeterminate", "submit_failed", "send_failed"])(
     "keeps a committed wake's %s outcome indeterminate in the queue", async reason => {
       const f = fixture(); await f.enable();

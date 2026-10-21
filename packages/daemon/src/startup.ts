@@ -463,6 +463,13 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
   // db.transaction commits atomically with the close + successor create.
   const outboxHandlerInstance = new OutboxHandler(db);
   queueRepoInstance.attachOutbox(outboxHandlerInstance);
+  // Reconcile only the prior process's claims, before transport/producers/timers can start new sends.
+  let reconciledWakeIntents = 0;
+  try {
+    reconciledWakeIntents = queueRepoInstance.reconcileAbandonedWakeIntents();
+  } catch (err) {
+    console.warn(`wake-intent claim recovery: failed (non-fatal): ${err instanceof Error ? err.message : String(err)}`);
+  }
   // PL-004 Phase B — classifier lease manager. Constructed early so both
   // the leaseManager dep slot and project-classifier can share one instance.
   // isAlive is post-attached after whoami-service is constructed.
@@ -2425,10 +2432,8 @@ export async function createDaemon(opts?: DaemonOptions): Promise<DaemonResult> 
     // No periodic timer (ruled out of scope): a transient failure lands the row
     // in a VISIBLE state and is retried on the next start.
     try {
-      // BLOCKING 1: reconcile abandoned `sending` claims (a prior crash) FIRST,
-      // then drain committed `pending` intents. Reconcile is a one-time boundary
-      // step, separate from the drain.
-      const reconciled = queueRepoInstance.reconcileAbandonedWakeIntents();
+      // Prior-process claims were reconciled before current-process producers started.
+      const reconciled = reconciledWakeIntents;
       const drained = await queueRepoInstance.drainPendingWakeIntents();
       if (drained.delivered || drained.indeterminate || drained.failed || reconciled) {
         console.log(

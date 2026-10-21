@@ -996,8 +996,8 @@ export class QueueRepository {
   }
 
   private currentWakeIntent(entry: QueueWakeFacts): boolean {
-    const row = entry.auditPointer ? this.db.prepare("SELECT state FROM queue_items WHERE qitem_id=?").get(entry.auditPointer) as { state: string } | undefined : undefined;
-    if (row?.state !== "pending") return false;
+    const row = entry.auditPointer ? this.db.prepare("SELECT state, destination_session FROM queue_items WHERE qitem_id=?").get(entry.auditPointer) as { state: string; destination_session: string } | undefined : undefined;
+    if (row?.state !== "pending" || row.destination_session !== entry.destinationSession) return false;
     const prefix = `${WAKE_INTENT_PREFIX}blocker-`;
     if (!entry.outboxId.startsWith(prefix)) return true;
     const expected = Number(entry.outboxId.slice(prefix.length));
@@ -1229,33 +1229,29 @@ export class QueueRepository {
   }
 
   /**
-   * W1-b: deliver ONE committed wake intent. MF3: CLAIM (pending→sending) before
-   * the external send, then finalize (sending→outcome) after — so overlapping
-   * drains send the wake exactly ONCE (the effect, not just the state), and a
-   * second drain of an already-claimed/resolved intent skips. Returns what
-   * happened for the drain's tally.
-   *
-   *   verified          → delivered
-   *   ok, unverified    → indeterminate   (ambiguous; never silently delivered/failed)
-   *   timeout (MF6)     → indeterminate   (may have landed — not a hard failure)
-   *   other not-ok/throw→ failed          (visible terminal state)
+   * Attempt a current committed notification. A live claim, known success or manual
+   * hold is left alone; failed/uncertain history permits another attempt. A recovery
+   * pass tracks its coalesced members only in memory so each is attempted once per pass.
    */
   private async deliverWakeIntent(
     outboxId: string,
+    attempted?: Set<string>,
   ): Promise<"delivered" | "indeterminate" | "failed" | "skipped" | "retained"> {
     if (!this.outbox) return "skipped";
     if (!this.transport) return "skipped"; // no transport → stays pending for a later drain
+    if (attempted?.has(outboxId)) return "skipped";
     const alreadyHeld = this.outbox.getById(outboxId);
     if (alreadyHeld?.deliveryState === "retained" || alreadyHeld?.deliveryState === "retired") {
       if (alreadyHeld.auditPointer) this.recordNudgeAttempt(alreadyHeld.auditPointer, "retained:typing_guard");
       return "retained";
     }
-    // MF3: CLAIM (pending→sending) BEFORE the external send so overlapping drains
-    // cannot both send. A losing claim — the row is no longer `pending` (already
-    // resolved, in-flight under another drainer, or claimed) — simply skips: no
-    // send, no tally. This makes the external effect once, not merely the state.
-    // Claim the exact return's arrival + dependent resumes atomically. Each
-    // original frozen intent and audit pointer survives; only transport coalesces.
+    let recovering = false;
+    const claim = (entry: OutboxEntry): boolean => {
+      if (attempted?.has(entry.outboxId) || !this.outbox!.claimForDelivery(entry.outboxId)) return false;
+      attempted?.add(entry.outboxId);
+      recovering ||= entry.deliveryState !== "pending";
+      return true;
+    };
     let superseded = false;
     const actionable = (entry: import("./outbox-handler.js").OutboxEntry): boolean => {
       const current = this.currentWakeIntent(entry);
@@ -1271,17 +1267,20 @@ export class QueueRepository {
     };
     const group = this.db.transaction(() => {
       const candidate = this.outbox!.getById(outboxId);
-      if (!candidate || candidate.deliveryState !== "pending" || !actionable(candidate)) return [];
-      if (!this.outbox!.claimForDelivery(outboxId)) return [];
-      const first = this.outbox!.getById(outboxId)!;
+      if (!candidate || !["pending", "failed", "indeterminate"].includes(candidate.deliveryState) || !actionable(candidate)) return [];
+      if (!claim(candidate)) return [];
+      const first = candidate; // Keep each member's pre-claim uncertainty.
       const intents = [first];
       const correlation = first.tags?.find(tag => tag.startsWith("queue:return:"));
       if (correlation) {
         const peers = this.db.prepare(`SELECT outbox_id FROM outbox_entries
-          WHERE delivery_state = 'pending' AND destination_session = ? AND substr(outbox_id, 1, ?) = ?
+          WHERE delivery_state IN ('pending','failed','indeterminate') AND destination_session = ? AND substr(outbox_id, 1, ?) = ?
           AND EXISTS (SELECT 1 FROM json_each(outbox_entries.tags) WHERE value = ?)
           ORDER BY outbox_id`).all(first.destinationSession, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, correlation) as Array<{ outbox_id: string }>;
-        for (const peer of peers) if (actionable(this.outbox!.getById(peer.outbox_id)!) && this.outbox!.claimForDelivery(peer.outbox_id)) intents.push(this.outbox!.getById(peer.outbox_id)!);
+        for (const peer of peers) {
+          const entry = this.outbox!.getById(peer.outbox_id)!;
+          if (actionable(entry) && claim(entry)) intents.push(entry);
+        }
       }
       return intents;
     })();
@@ -1296,13 +1295,18 @@ export class QueueRepository {
       return "failed";
     }
     const qitemId = intent.auditPointer ?? outboxId;
-    // MF4: send the FROZEN envelope stored on the intent verbatim (no re-resolution).
+    // Preserve the original envelope/source generation; add context without rewriting its stored bytes.
+    const recoveryNotice = recovering ? "Recovered queue notification: delivery may repeat after an earlier unconfirmed attempt.\n" : "";
     const outcome = await this.performWakeSend(
-      qitemId, intent.destinationSession, intent.senderSession, undefined, group.map(entry => entry.body).join("\n"), group.map(entry => entry.outboxId),
+      qitemId, intent.destinationSession, intent.senderSession, undefined, recoveryNotice + group.map(entry => entry.body).join("\n"), group.map(entry => entry.outboxId),
     );
-    const finalState = outcome.classified === "verified" ? "delivered" : outcome.classified;
-    for (const member of group) {
-      const intent = member;
+    let reportedState: "delivered" | "indeterminate" | "failed" | "retained" = outcome.classified === "verified" ? "delivered" : outcome.classified;
+    for (const intent of group) {
+      // A no-write retry cannot settle whether an earlier attempt landed.
+      const earlierUnknown = intent.deliveryState === "indeterminate" && outcome.classified === "failed";
+      const finalState = earlierUnknown ? "indeterminate" : outcome.classified === "verified" ? "delivered" : outcome.classified;
+      const nudgeResult = earlierUnknown ? `indeterminate:earlier delivery unconfirmed; retry ${outcome.nudgeResult}` : outcome.nudgeResult;
+      if (earlierUnknown) reportedState = "indeterminate";
       const qitemId = intent.auditPointer!;
       const blockerRef = intent.tags?.includes(AUTO_UNPARK_WAKE_TAG)
         ? intent.tags
@@ -1311,7 +1315,7 @@ export class QueueRepository {
         : undefined;
       const wakeEvent = this.db.transaction(() => {
         // #1278: a coalesced wake is one send, so every row it woke gets that send's reading.
-        this.recordNudgeAttempt(qitemId, outcome.nudgeResult, outcome.inputBox);
+        this.recordNudgeAttempt(qitemId, nudgeResult, outcome.inputBox);
         this.outbox!.finalizeDelivery(intent.outboxId, finalState);
         if (!blockerRef) return null;
 
@@ -1320,7 +1324,7 @@ export class QueueRepository {
           qitemId,
           state: item.state,
           actorSession: "queue@system",
-          transitionNote: `blocker ${blockerRef} wake attempted; delivery=${outcome.nudgeResult}`,
+          transitionNote: `blocker ${blockerRef} wake attempted; delivery=${nudgeResult}`,
         });
         this.wakeRepo.record({
           transitionId: transition.transitionId,
@@ -1328,7 +1332,7 @@ export class QueueRepository {
           phase: "fired",
           kind: "blocker",
           ref: blockerRef,
-          deliveryStatus: outcome.nudgeResult,
+          deliveryStatus: nudgeResult,
         });
         return this.eventBus.persistWithinTransaction({
           type: "queue.updated",
@@ -1343,33 +1347,11 @@ export class QueueRepository {
       })();
       if (wakeEvent) this.eventBus.notifySubscribers(wakeEvent);
     }
-    return finalState;
+    return reportedState;
   }
 
-  /**
-   * W1-b: the post-commit delivery for a successor's wake, and the ONE shared
-   * staged-intent delivery path. When the durable intent store is present
-   * (production), deliver the just-committed intent — which CLAIMS and FINALIZES
-   * the row, so a later recovery sweep cannot send it a second time. When it is
-   * absent (test/bootstrap), fall back to the pre-W1 best-effort nudge so behavior
-   * is unchanged where there is no intent to make durable. Called AFTER the
-   * terminal transaction commits (reversed-never: a pane write must not join the
-   * db transaction).
-   *
-   * PUBLIC as of P34: every terminal-closing writer that stages an intent must
-   * deliver through THIS path rather than {@link maybeNudge}. `maybeNudge` sends
-   * WITHOUT claiming or finalizing, so a staged intent would remain `pending` and
-   * the startup recovery sweep would deliver the same wake AGAIN. One staged
-   * intent, one delivery, one finalized row.
-   *
-   * P34 correction: the no-outbox fallback above was documented here but never
-   * implemented — `deliverWakeIntent` simply returns "skipped" with no outbox
-   * attached, so the nudge vanished SILENTLY (a skip is not an error, so nothing
-   * surfaced it). The pre-W1 callers reached this path only after the MF2 guard
-   * had already proven an outbox was attached, which is why it never showed. P34
-   * routes writers here whose harnesses attach no outbox, so the fallback is now
-   * real code rather than a promise in a comment.
-   */
+  /** Deliver after the queue transaction commits, never from inside it. The shared
+   * intent path owns claims and outcomes; without an intent store use the legacy nudge. */
   async deliverWakeForSuccessor(
     successorQitemId: string,
     destinationSession: string,
@@ -1387,54 +1369,42 @@ export class QueueRepository {
     await this.deliverWakeIntent(`${WAKE_INTENT_PREFIX}${successorQitemId}`);
   }
 
-  /**
-   * W1-b: the startup-recovery sweep. Delivers wake intents a crash left
-   * committed-but-undelivered (the terminal txn committed, the process died
-   * before the post-commit deliver). Pages in bounded batches and TERMINATES on
-   * a served short batch or on a no-progress round (a flapping transport marks
-   * rows failed = visible, so it still progresses) — never a silent cap, never a
-   * spin.
-   *
-   * MF6 (honest retry policy): the sweep retries ONLY `pending` rows — i.e. wake
-   * intents a crash left committed-but-undelivered. Terminal `failed` and
-   * `indeterminate` rows are NOT re-driven: a failed row would risk resurrecting
-   * a dead wake and an indeterminate one may already have landed (double-send).
-   * Both are left in a VISIBLE terminal state for out-of-band reconciliation. No
-   * periodic timer (out of scope, ruled); a bounded retry of failed rows is the
-   * NAMED residue, not a silent guarantee.
-   */
-  /**
-   * BLOCKING 1 (guard re-seal): the recovery-boundary reconciliation, called ONCE
-   * at startup (NOT inside the drain, which can be invoked concurrently). Moves any
-   * abandoned `sending` wake intents — a prior crashed process's claims — to
-   * `indeterminate`, WITHOUT re-sending: a claim left `sending` is ambiguous (the
-   * send may or may not have landed). Kept SEPARATE from drainPendingWakeIntents so
-   * an overlapping drain can never reconcile another drain's in-flight claim.
-   * Returns the count reconciled.
-   */
+  /** Once at startup, mark abandoned live claims unknown before recovery makes a
+   * new attempt. Never run inside a drain: another drain may still own a live send. */
   reconcileAbandonedWakeIntents(): number {
     if (!this.outbox) return 0;
     return this.outbox.reconcileAbandonedSending(WAKE_INTENT_PREFIX);
   }
 
+  /** Recover current notifications once per pass. A snapshot horizon and seek cursor
+   * prevent new arrivals or persistent failures from making this pass unbounded. */
   async drainPendingWakeIntents(): Promise<{ delivered: number; indeterminate: number; failed: number; retained: number }> {
     const tally = { delivered: 0, indeterminate: 0, failed: 0, retained: 0 };
     if (!this.outbox || !this.transport) return tally;
     const BATCH = 200;
+    const horizon = (this.db.prepare("SELECT COALESCE(MAX(rowid),0) AS id FROM outbox_entries").get() as { id: number }).id;
+    // Retire never-attempted obsolete notifications without materializing historical intents.
+    tally.failed += this.db.prepare(`UPDATE outbox_entries AS o SET delivery_state = 'failed',
+      tags = json_insert(COALESCE(tags, '[]'), '$[#]', 'queue:wake-superseded')
+      WHERE delivery_state = 'pending' AND rowid <= ? AND substr(outbox_id, 1, ?) = ?
+        AND NOT EXISTS (SELECT 1 FROM queue_items q WHERE q.qitem_id = o.audit_pointer
+          AND q.state = 'pending' AND q.destination_session = o.destination_session)`)
+      .run(horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX).changes;
+    const attempted = new Set<string>();
+    let cursor = 0;
     for (;;) {
-      const pending = this.outbox.listPending(WAKE_INTENT_PREFIX, BATCH);
+      const pending = this.db.prepare(`SELECT o.rowid AS id, o.outbox_id FROM outbox_entries o
+        JOIN queue_items q ON q.qitem_id = o.audit_pointer AND q.state = 'pending'
+          AND q.destination_session = o.destination_session
+        WHERE o.rowid > ? AND o.rowid <= ? AND substr(o.outbox_id, 1, ?) = ?
+          AND o.delivery_state IN ('pending','failed','indeterminate') ORDER BY o.rowid LIMIT ?`)
+        .all(cursor, horizon, WAKE_INTENT_PREFIX.length, WAKE_INTENT_PREFIX, BATCH) as Array<{ id: number; outbox_id: string }>;
       if (pending.length === 0) break;
-      let progressed = 0;
       for (const intent of pending) {
-        const outcome = await this.deliverWakeIntent(intent.outboxId);
-        if (outcome === "delivered") { tally.delivered++; progressed++; }
-        else if (outcome === "indeterminate") { tally.indeterminate++; progressed++; }
-        else if (outcome === "failed") { tally.failed++; progressed++; }
-        else if (outcome === "retained") { tally.retained++; progressed++; }
+        cursor = intent.id;
+        const outcome = await this.deliverWakeIntent(intent.outbox_id, attempted);
+        if (outcome !== "skipped") tally[outcome]++;
       }
-      // Nothing left pending changed state this round (e.g. transport gone
-      // mid-sweep) — stop rather than spin; the next daemon start retries.
-      if (progressed === 0) break;
       if (pending.length < BATCH) break; // served short batch ⇒ drained
     }
     return tally;
@@ -1475,14 +1445,11 @@ export class QueueRepository {
     this.recordNudgeAttempt(qitemId, outcome.nudgeResult, outcome.inputBox);
   }
 
-  /** Boot recovery must respect an existing intent's claim and terminal outcome.
-   * Older entry packets have no intent and still need the legacy nudge path. */
+  /** The following startup intent drain owns durable pending wakes. Legacy packets
+   * and overdue claimed work (not eligible for that drain) still use the nudge path. */
   async recoverLostNudge(qitemId: string, destinationSession: string, sourceSession?: string): Promise<void> {
     const outboxId = `${WAKE_INTENT_PREFIX}${qitemId}`;
-    if (this.outbox?.getById(outboxId)) {
-      await this.deliverWakeIntent(outboxId);
-      return;
-    }
+    if (this.outbox?.getById(outboxId) && this.getById(qitemId)?.state === "pending") return;
     await this.maybeNudge(qitemId, destinationSession, undefined, sourceSession);
   }
 

@@ -1385,6 +1385,47 @@ describe("#514 unclaimed sweep and a pending ask posted to a registered human", 
       && (i.tags ?? []).some((t) => t.endsWith(`:${qitemId}`)));
   }
 
+  it.each([
+    ["park", "never-posted"], ["park", "transport-failed"],
+    ["direct", "never-posted"], ["direct", "transport-failed"],
+  ] as const)("#1679 %s %s identifies the human notice and routes its recovery to the asking agent", async (shape, outcome) => {
+    repo.attachTransport({ send: async () => ({ ok: true, verified: false }) }); // recorded unconfirmed wake becomes claimed on pickup
+    const row = shape === "direct" ? await ask() : await repo.create({
+      sourceSession: "asker@r", destinationSession: "worker@r", body: "work",
+    });
+    if (shape === "park") {
+      repo.claim({ qitemId: row.qitemId, destinationSession: "worker@r" });
+      await repo.update({ qitemId: row.qitemId, actorSession: "worker@r", state: "blocked",
+        blockedOn: "human-owner@kernel", summary: "Owner decision", evidenceRef: "rig queue show qitem-fixture" });
+    }
+    if (shape === "park" && outcome === "transport-failed") await repo.update({ qitemId: row.qitemId, actorSession: "worker@r",
+      transitionNote: "wake-attempt: 1 prior agent wake" }); // an old wake ladder cannot hide the human notice
+    if (outcome === "transport-failed") receipt(row.qitemId, "transport-failed");
+    // Age the notice alone: no unrelated unclaimed/overdue condition is introduced.
+    const episode = repo.transitionLog.latestOwnerNotificationForQitem(row.qitemId)!;
+    db.prepare("UPDATE queue_transitions SET ts = ? WHERE transition_id = ?")
+      .run(new Date(Date.now() - 5 * 60_000).toISOString(), episode.transitionId);
+    expect(repo.findUndelivered().find((r) => r.qitemId === row.qitemId)?.deliveryOutcome).toBe(outcome);
+    const before = repo.getById(row.qitemId)!;
+    const storedBefore = db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId);
+    if (shape === "park") expect(before.lastNudgeResult).toBe("claimed");
+    await sweepMod().then((mod) => mod.runStuckSweep({ db, queueRepo: repo,
+      resolveOrchestrator: () => "advisor@r", unclaimedAgeMinutes: 60, log: () => {}, isRegisteredHost: () => false }));
+    const [finding] = await findingsFor(row.qitemId);
+    expect(finding).toMatchObject({ destinationSession: shape === "park" ? "worker@r" : "asker@r" });
+    expect(finding!.body).toContain("undelivered-human-notice");
+    expect(finding!.body).toContain(`human notice ${outcome}`);
+    expect(finding!.body).toContain(shape === "park" ? "human-owner@kernel" : "human-owner@external");
+    expect(finding!.body).not.toContain("wake failed");
+    expect(db.prepare("SELECT * FROM queue_items WHERE qitem_id = ?").get(row.qitemId)).toEqual(storedBefore);
+    await sweep();
+    expect(await findingsFor(row.qitemId)).toHaveLength(1);
+    receipt(row.qitemId, "posted");
+    await sweep();
+    expect(repo.getById(finding!.qitemId)?.state).toBe("done");
+    expect(repo.getById(row.qitemId)?.state).toBe(shape === "park" ? "blocked" : "pending");
+  });
+
   // human-owner@kernel is the registry alias form (canonical member name = entity id).
   it.each(["human-owner@external", "human-owner@kernel"])("a %s ask with a POSTED receipt for its current episode gets no finding and stays the human's open decision", async (destination) => {
     const row = await ask(destination);
