@@ -88,6 +88,9 @@ import { pluginPathsOf } from "./claude-core-plugin-env.js";
 export { resolveActiveSnapshotSession } from "./active-occupant.js";
 export type { ActiveSnapshotSessionResolution } from "./active-occupant.js";
 
+/** Pre-restore blockers that concern one seat's own startup content; see restore(). */
+const SEAT_STARTUP_BLOCKERS = new Set(["required_startup_file_missing", "startup_owner_root_missing"]);
+
 export function rollupRestoreRigResult(nodes: RestoreNodeResult[]): RestoreRigResult {
   if (nodes.length === 0) return "failed";
   // L3: `attention_required` is non-terminal failure (alive but blocked on
@@ -344,7 +347,18 @@ export class RestoreOrchestrator {
         currentRuntimes: Object.fromEntries((this.rigRepo.getRig(rigId)?.nodes ?? []).map((current) => [current.logicalId, current.runtime])),
       });
       const topology = resolveSnapshotRestoreTopology(snapshot.data);
-      if (validation.blockers.length > 0) {
+      // A required startup file that is missing holds only its own seat. That seat isn't launched, because it would start
+      // without its startup content; it's reported failed with the reason, and the rest of the rig restores. Any other
+      // blocker, or holds on every seat this restore would launch, still stops the whole restore before any mutation.
+      const heldForStartup = new Map<string, string>();
+      for (const blocker of validation.blockers) {
+        if (!SEAT_STARTUP_BLOCKERS.has(blocker.code) || !blocker.nodeId) continue;
+        const reason = `${blocker.message} ${blocker.remediation}`;
+        heldForStartup.set(blocker.nodeId, heldForStartup.has(blocker.nodeId) ? `${heldForStartup.get(blocker.nodeId)} ${reason}` : reason);
+      }
+      const planIds = this.computeRestorePlan(snapshot.data).filter(entry => !replacements.length || selectedIds.has(entry.node.id)).map(entry => entry.node.id);
+      const rigWide = validation.blockers.some((blocker) => !SEAT_STARTUP_BLOCKERS.has(blocker.code) || !blocker.nodeId);
+      if (rigWide || planIds.every((id) => heldForStartup.has(id))) {
         const result: RestoreResult = {
           snapshotId,
           preRestoreSnapshotId: null,
@@ -430,6 +444,11 @@ export class RestoreOrchestrator {
       if (this.rigRepo.getRigNonInterruptive(rigId)) restoreWarnings.push(nonInterruptiveSummary(true));
       else if (opts?.nonInterruptive === false) restoreWarnings.push(nonInterruptiveSummary(false));
       for (const entry of plan) {
+        const held = heldForStartup.get(entry.node.id);
+        if (held) {
+          nodeResults.push({ nodeId: entry.node.id, logicalId: entry.node.logicalId, status: "failed", error: `Not launched: ${held}` });
+          continue;
+        }
         const replacement = replacements.find(target => target.nodeId === entry.node.id);
         const result = await this.restoreNodeWithCompensation(entry, rigId, snapshotId, snapshot.data, opts, restoreWarnings, stoppedNodeIds.has(entry.node.id));
         nodeResults.push(result);
