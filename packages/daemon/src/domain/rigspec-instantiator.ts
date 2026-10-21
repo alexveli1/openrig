@@ -1,5 +1,4 @@
 import nodePath from "node:path";
-import { shellQuote } from "../adapters/shell-quote.js";
 import { effortPrecedence, readSeatEffort } from "./seat-effort.js";
 import type Database from "better-sqlite3";
 import {
@@ -30,13 +29,6 @@ interface RigInstantiatorDeps {
   nodeLauncher: NodeLauncher;
   preflight: RigSpecPreflight;
   tmuxAdapter?: import("../adapters/tmux.js").TmuxAdapter;
-}
-
-function partialEnvCleanupGuidance(rigId: string, logicalId: string, error: string): string {
-  const launch = `rig launch ${shellQuote(rigId)} ${shellQuote(logicalId)}`;
-  const remove = `rig down ${shellQuote(rigId)} --delete`;
-  return error.replace(/ Run it again\.$/, "")
-    + ` This team has been kept. To relaunch only "${logicalId}", run: ${launch}. This does not reapply the unsaved --env values. If those values are needed, first run: ${remove}. This stops and removes the team this launch just created. Then re-run the original rig up command with --env.`;
 }
 
 export class RigInstantiator {
@@ -156,8 +148,6 @@ export class RigInstantiator {
     const nodeResults: { logicalId: string; status: "launched" | "failed"; error?: string }[] = [];
     const launchedSessionNames: string[] = [];
     const instantiateWarnings: string[] = [];
-    const envCleanupErrors: string[] = [];
-    const envCleanupFailures: { logicalId: string; error: string }[] = [];
 
     for (const logicalId of launchOrder) {
       const result = await this.nodeLauncher.launchNode(rigId!, logicalId, opts?.env ? { env: opts.env } : undefined);
@@ -168,12 +158,7 @@ export class RigInstantiator {
           instantiateWarnings.push(...result.warnings);
         }
       } else {
-        const failure = { logicalId, status: "failed" as const, error: result.message };
-        nodeResults.push(failure);
-        if (result.code === "seat_env_cleanup_failed") {
-          envCleanupFailures.push(failure);
-          envCleanupErrors.push(`${logicalId}: ${result.message}`);
-        }
+        nodeResults.push({ logicalId, status: "failed", error: result.message });
       }
     }
 
@@ -195,17 +180,9 @@ export class RigInstantiator {
       return {
         ok: false,
         code: "instantiate_error",
-        message: envCleanupErrors.length ? `all node launches failed — ${envCleanupErrors.join("; ")}` : "all node launches failed",
-        ...(envCleanupErrors.length ? { envCleanupErrors } : {}),
+        message: "all node launches failed",
       };
     }
-
-    // A partial launch keeps the rig: repeating up would collide with its live seats.
-    // Leave all-failed retry guidance and any unconfirmed-removal warning intact.
-    envCleanupFailures.forEach((failure, index) => {
-      failure.error = partialEnvCleanupGuidance(rigId!, failure.logicalId, failure.error);
-      envCleanupErrors[index] = `${failure.logicalId}: ${failure.error}`;
-    });
 
     // 6. Propagate restorePolicy to session metadata (best-effort)
     try {
@@ -245,7 +222,6 @@ export class RigInstantiator {
       ok: true,
       result: {
         rigId: rigId!,
-        ...(envCleanupErrors.length ? { envCleanupErrors } : {}),
         specName: spec.name,
         specVersion: spec.version,
         nodes: nodeResults,
@@ -1652,8 +1628,6 @@ export class PodRigInstantiator {
     const hasAttention = nodeResults.some((n) => n.status === "attention_required");
     const hasLaunched = nodeResults.some((n) => n.status === "launched");
     const allTerminal = nodeResults.length > 0 && nodeResults.every((n) => n.status === "failed");
-    const envCleanupFailures = nodeResults.filter((n) => n.code === "seat_env_cleanup_failed");
-    const envCleanupErrors = envCleanupFailures.map((n) => `${n.logicalId}: ${n.error}`);
 
     if (allTerminal) {
       let serviceCleanupError: string | undefined;
@@ -1690,15 +1664,8 @@ export class PodRigInstantiator {
       return {
         ok: false, code: "instantiate_error",
         message: `all node launches/startups failed — ${details}${serviceCleanupError ? `; ${serviceCleanupError}` : ""}`,
-        ...(envCleanupErrors.length ? { envCleanupErrors } : {}),
       };
     }
-
-    // The rig is retained; show the same recovery choices as a flat partial.
-    envCleanupFailures.forEach((failure, index) => {
-      failure.error = partialEnvCleanupGuidance(rigId, failure.logicalId, failure.error ?? "Launch environment cleanup failed.");
-      envCleanupErrors[index] = `${failure.logicalId}: ${failure.error}`;
-    });
 
     if (hasAttention && !hasLaunched) {
       // All-attention_required path — rig + sessions PRESERVED; no
@@ -1727,7 +1694,7 @@ export class PodRigInstantiator {
       return {
         ok: false,
         code: "attention_required",
-        message: `${attentionNodes.length} node${attentionNodes.length === 1 ? " requires" : "s require"} attention before becoming interactive. Inspect the affected sessions and reasons before choosing recovery.${envCleanupErrors.length ? ` ${envCleanupErrors.join("; ")}` : ""}`,
+        message: `${attentionNodes.length} node${attentionNodes.length === 1 ? " requires" : "s require"} attention before becoming interactive. Inspect the affected sessions and reasons before choosing recovery.`,
         rigId,
         attentionNodes,
         // #141: the replacement is kept on this path, so its archive notice must reach the user too.
@@ -1760,7 +1727,7 @@ export class PodRigInstantiator {
 
     return {
       ok: true,
-      result: { rigId, specName: rigSpec.name, specVersion: rigSpec.version, nodes: resultNodes, ...(envCleanupErrors.length ? { envCleanupErrors } : {}), warnings: podInstantiateWarnings.length > 0 ? podInstantiateWarnings : undefined },
+      result: { rigId, specName: rigSpec.name, specVersion: rigSpec.version, nodes: resultNodes, warnings: podInstantiateWarnings.length > 0 ? podInstantiateWarnings : undefined },
     };
   }
 

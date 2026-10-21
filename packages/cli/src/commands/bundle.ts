@@ -429,9 +429,6 @@ const ROUTING_LABELS: Array<[string, string]> = [
 
 /** Render the daemon's reason verbatim, including continuation guidance when available. */
 export function startupAttentionSummary(data: Record<string, unknown>): string[] {
-  if (data["code"] === "seat_env_cleanup_failed") {
-    return ((data["errors"] as string[] | undefined) ?? []).map(error => `Launch incomplete: ${error}`);
-  }
   const stages = data["stages"] as Array<{ detail?: { attentionNodes?: Array<{ sessionName?: string; logicalId?: string; reason?: string }> } }> | undefined;
   const lines: string[] = [];
   for (const stage of Array.isArray(stages) ? stages : []) {

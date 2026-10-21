@@ -182,30 +182,22 @@ export class NodeLauncher {
       return { ok: false, code: tmuxResult.code, message: tmuxResult.message };
     }
 
+    // The session's own non-fatal warnings (#771: the parent-session identity cleanup).
+    const launchWarnings: string[] = [...(tmuxResult.warnings ?? [])];
+
     // A one-off `rig up --env` value is on the first pane's command line and, because that is how
     // `new-session -e` works, in the session environment, which a respawned pane (a handover
     // successor) inherits. The first pane has already started with it, so take it back out of the
     // session: the spec's or OpenRig's own value for a name they set, no value for the rest.
+    // A name that can't be taken out leaves this seat running as launched; the warning says what a
+    // later pane would inherit and how to put it back. It never carries a value or tmux's text.
     if (opts?.env && Object.keys(opts.env).length > 0) {
-      const failed = await this.dropOneOffFromSession(sessionName, Object.keys(opts.env), launchEnv());
-      if (failed) {
-        // The first pane has already started with the one-off, so this is a stopped launch, not an
-        // undone one. Say whether the new session (the one this launch just created) is gone, and
-        // never include tmux's text or a value.
-        let removed = false;
-        try { removed = (await this.tmuxAdapter.killSession(sessionName)).ok; } catch { /* not confirmed */ }
-        return {
-          ok: false,
-          code: "seat_env_cleanup_failed",
-          message: removed
-            ? `Could not take the --env setting ${failed} out of the new session "${sessionName}" environment, so the launch was stopped and the session was removed. Run it again.`
-            : `Could not take the --env setting ${failed} out of the new session "${sessionName}" environment, so the launch was stopped, and the session could not be confirmed removed. It may still hold the --env values in its terminal and environment and nothing is bound to it: check it and remove it before running this again.`,
-        };
+      for (const name of await this.dropOneOffFromSession(sessionName, Object.keys(opts.env), launchEnv())) {
+        launchWarnings.push(`The one-off --env setting ${name} could not be taken out of session "${sessionName}"'s environment. `
+          + `The seat runs as launched, but a pane that later respawns in this session, such as a handover successor, would start with it. `
+          + `Before that, put it back with \`tmux set-environment -t ${sessionName} ${name} <usual value>\`, or remove it with \`tmux set-environment -t ${sessionName} -u ${name}\`.`);
       }
     }
-
-    // The session's own non-fatal warnings (#771: the parent-session identity cleanup).
-    const launchWarnings: string[] = [...(tmuxResult.warnings ?? [])];
 
     // Observe the pane before the DB transaction. A concrete pane is committed
     // with session+binding; an unresolved pane gets a durable named verdict in
@@ -311,10 +303,11 @@ export class NodeLauncher {
    * Put each one-off name back to what the session would have had without it: `baseline` has the
    * value the spec or OpenRig set for it, and a name with none is unset (the server's own value, if
    * it has one, is what a later pane gets). `TMUX` and `TMUX_PANE` belong to tmux and are left alone.
-   * Returns the name that could not be restored, or undefined when all were. The message built from
-   * it carries no value: tmux errors repeat the command line.
+   * Returns the names that could not be restored (every name is tried). The warning built from them
+   * carries no value: tmux errors repeat the command line.
    */
-  private async dropOneOffFromSession(session: string, names: string[], baseline: Record<string, string>): Promise<string | undefined> {
+  private async dropOneOffFromSession(session: string, names: string[], baseline: Record<string, string>): Promise<string[]> {
+    const failed: string[] = [];
     for (const name of names) {
       if (name === "TMUX" || name === "TMUX_PANE") continue;
       try {
@@ -322,10 +315,10 @@ export class NodeLauncher {
         if (value !== undefined) await this.tmuxAdapter.setSessionEnv(session, name, value);
         else await this.tmuxAdapter.unsetSessionEnv(session, name);
       } catch {
-        return name;
+        failed.push(name);
       }
     }
-    return undefined;
+    return failed;
   }
 }
 
