@@ -92,48 +92,33 @@ describe("NodeLauncher: a one-off --env stays with the first pane", () => {
     expect(calls).toEqual(["create"]);
   });
 
-  it("when the session can't be cleaned, the launch fails and the new session is removed; the message names the settings, not their values", async () => {
+  it("when a one-off can't be taken out of the session, the seat keeps running and a warning names it, never its value", async () => {
     const { rig } = seed();
     failOn = (call) => call.startsWith("set SHARED=");
     const result = await launcher().launchNode(rig.id, "dev1-impl", { env: { SHARED: "one-off-secret", ONLY_THIS_LAUNCH: "debug-secret" } });
-    expect(result).toMatchObject({ ok: false, code: "seat_env_cleanup_failed" });
-    if (result.ok) throw new Error("expected failure");
-    expect(result.message).toContain("SHARED");
-    for (const value of ["one-off-secret", "debug-secret", "from-spec"]) expect(result.message).not.toContain(value);
-    expect(killSession).toHaveBeenCalledTimes(1);
-    expect(result.message).toContain("was removed");
-    expect(result.message).not.toMatch(/nothing ran|rolled back/i);
-    expect(new SessionRegistry(db).getSessionsForRig(rig.id)).toHaveLength(0);
-    expect(rigRepo.getRig(rig.id)!.nodes[0]!.binding).toBeNull();
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected the launch to stand");
+    expect(killSession).not.toHaveBeenCalled();
+    expect(calls).toContain("unset ONLY_THIS_LAUNCH");
+    const warnings = (result.warnings ?? []).filter((w) => w.includes("--env setting"));
+    expect(warnings).toHaveLength(1);
+    expect(warnings[0]).toContain("SHARED");
+    expect(warnings[0]).toMatch(/handover successor/);
+    expect(warnings[0]).toContain("-u SHARED");
+    for (const value of ["one-off-secret", "debug-secret", "from-spec", "tmux set-environment failed"]) expect(warnings[0]).not.toContain(value);
+    expect(new SessionRegistry(db).getSessionsForRig(rig.id)).toHaveLength(1);
+    expect(rigRepo.getRig(rig.id)!.nodes[0]!.binding).not.toBeNull();
   });
 
-  const bothFail = async (removal: () => Promise<unknown>) => {
+  it("tries every one-off name and warns once for each that stays", async () => {
     const { rig } = seed();
-    failOn = (call) => call.startsWith("set SHARED=");
-    killSession.mockImplementation(removal);
+    failOn = (call) => call.startsWith("set SHARED=") || call === "unset ONLY_THIS_LAUNCH";
     const result = await launcher().launchNode(rig.id, "dev1-impl", { env: { SHARED: "one-off-secret", ONLY_THIS_LAUNCH: "debug-secret" } });
-    expect(result).toMatchObject({ ok: false, code: "seat_env_cleanup_failed" });
-    if (result.ok) throw new Error("expected failure");
-    expect(killSession).toHaveBeenCalledTimes(1);
-    expect(killSession).toHaveBeenCalledWith(result.message.match(/"([^"]+)"/)![1]);
-    expect(result.message).toContain("SHARED");
-    expect(result.message).toMatch(/could not be confirmed removed/);
-    expect(result.message).toMatch(/check|remove/i);
-    expect(result.message).not.toMatch(/was removed|run it again|nothing ran|rolled back/i);
-    for (const value of ["one-off-secret", "debug-secret", "from-spec", "tmux said", "kill failed"]) expect(result.message).not.toContain(value);
-    // Nothing was bound to the session either way.
-    expect(new SessionRegistry(db).getSessionsForRig(rig.id)).toHaveLength(0);
-    expect(rigRepo.getRig(rig.id)!.nodes[0]!.binding).toBeNull();
-    return result.message;
-  };
-
-  it("when the cleanup fails and the removal reports failure, the message says the session was not confirmed removed and names it", async () => {
-    const message = await bothFail(async () => ({ ok: false as const, code: "tmux_error", message: "tmux said kill failed with one-off-secret" }));
-    expect(message).toContain("dev1-impl");
-  });
-
-  it("when the cleanup fails and the removal throws, the message says the same", async () => {
-    await bothFail(async () => { throw new Error("kill failed one-off-secret"); });
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error("expected the launch to stand");
+    const warnings = (result.warnings ?? []).filter((w) => w.includes("--env setting"));
+    expect(warnings.map((w) => w.match(/--env setting (\S+)/)![1]).sort()).toEqual(["ONLY_THIS_LAUNCH", "SHARED"]);
+    expect(killSession).not.toHaveBeenCalled();
   });
 
   it("a launch whose session could not be created removes nothing", async () => {

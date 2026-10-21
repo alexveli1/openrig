@@ -335,9 +335,9 @@ describe("BootstrapOrchestrator", () => {
       expect(rigRepo.getRig(result.rigId!)!.nodes.every((node) => !node.env)).toBe(true);
     });
 
-    describe.each([true, false])("cleanup failure accounting, single seat=%s", (singleSeat) => {
-      it.each(["confirmed", "unconfirmed", "throw"] as const)("reports the stopped launch and retained effects when removal is %s", async (removal) => {
-        const { orch, tmux, rigRepo, started, live } = await realLaunch({ removal });
+    describe.each([true, false])("a one-off that stays in the session, single seat=%s", (singleSeat) => {
+      it("keeps every launched seat running and reports the leftover by name with its remedy", async () => {
+        const { orch, tmux, rigRepo, started, live } = await realLaunch({ removal: "confirmed" });
         const input = await source(singleSeat);
         const { createTestApp } = await import("./helpers/test-app.js");
         const { app } = createTestApp(db, { tmux, appDeps: { bootstrapOrchestrator: orch }, upRouterFsOps: {
@@ -377,53 +377,24 @@ describe("BootstrapOrchestrator", () => {
         const human = await render();
         projectOnly = true; // JSON renders the same retained HTTP response; it does not launch again.
         const json = await render(true);
-        const baseline = process.env.EXPECT_ENV_CLEANUP_BASELINE === "1";
-        const effects = { started, surviving: [...live].map(([session, env]) => ({ session, hasProbe: "DOCSDESK_ENV_PROBE" in env })), killCalls: vi.mocked(tmux.killSession).mock.calls.map(c => c[0]), boundSessions: db.prepare("SELECT tmux_session FROM bindings").all(), rigs: rigRepo.listRigs().length };
-        console.info("LEGACY_ENV_CLEANUP_OBSERVATION=" + JSON.stringify({ format, singleSeat, removal, baseline, http: observed?.status, status: observed?.data.status, human, jsonExit: json.exit, effects }));
+        // Every first pane started with the one-off. Its cleanup failed, and the seats keep running: nothing is killed or
+        // rolled back, and the leftover is reported by name with how to put it back, never by value.
         expect(started).toHaveLength(singleSeat ? 1 : 2);
-        expect(started.every(s => s.hasProbe === !baseline)).toBe(true);
-        if (baseline) {
-          expect(observed?.status).toBe(201);
-          expect(observed?.data.status).toBe("completed");
-          expect([human.exit, json.exit]).toEqual([0, 0]);
-          expect(human.text).toContain("Status: completed");
-          expect(tmux.killSession).not.toHaveBeenCalled();
-          expect(live.size).toBe(singleSeat ? 1 : 2);
-        } else {
-          expect(observed?.status).toBe(singleSeat ? 500 : 200);
-          expect(observed?.data.status).toBe(singleSeat ? "failed" : "partial");
-          expect(observed?.data.code).toBe("seat_env_cleanup_failed");
-          expect([human.exit, json.exit]).toEqual(singleSeat ? [2, 2] : [1, 1]);
-          expect(human.text).toContain("DOCSDESK_ENV_PROBE");
-          expect(human.text).toContain(started.find(s => isDevSession(s.session))!.session);
-          expect(human.text).toContain(removal === "confirmed" ? "session was removed" : "check it and remove it");
-          const errors = JSON.stringify(observed?.data.errors);
-          if (singleSeat) {
-            expect(rigRepo.listRigs()).toHaveLength(0);
-            if (removal === "confirmed") expect(human.text).toContain("Run it again.");
-            expect(human.text).not.toContain("To relaunch only");
-          } else {
-            const retained = rigRepo.listRigs();
-            expect(retained).toHaveLength(1);
-            const command = `rig launch '${retained[0]!.id}' '${failedSeat}'`;
-            const remove = `rig down '${retained[0]!.id}' --delete`;
-            for (const rendered of [human.text, errors, json.text]) {
-              expect(rendered).toContain(command);
-              expect(rendered).toContain("does not reapply the unsaved --env values");
-              expect(rendered).toContain(remove);
-              expect(rendered).toContain("removes the team this launch just created");
-              expect(rendered).toContain("original rig up command with --env");
-              expect(rendered).not.toContain("Run it again.");
-              expect(rendered).not.toContain(`${command} --env`);
-            }
-            expect(rigRepo.getRig(retained[0]!.id)!.nodes.every(node => !node.env)).toBe(true);
-          }
-          expect(human.text).not.toContain("synthetic-private-value");
-          expect(human.text).not.toContain("private unset fault");
-          expect(JSON.stringify(observed?.data.errors)).toContain("DOCSDESK_ENV_PROBE");
-          expect(tmux.killSession).toHaveBeenCalledTimes(1);
-          expect(live.size).toBe((singleSeat ? 0 : 1) + (removal === "confirmed" ? 0 : 1));
-          expect([...live].some(([session, env]) => isDevSession(session) && "DOCSDESK_ENV_PROBE" in env)).toBe(removal !== "confirmed");
+        expect(started.every(s => s.hasProbe)).toBe(true);
+        expect(observed?.status).toBe(201);
+        expect(observed?.data.status).toBe("completed");
+        expect(observed?.data.code).toBeUndefined();
+        expect([human.exit, json.exit]).toEqual([0, 0]);
+        expect(tmux.killSession).not.toHaveBeenCalled();
+        expect(live.size).toBe(singleSeat ? 1 : 2);
+        expect(rigRepo.listRigs()).toHaveLength(1);
+        const devSession = started.find(s => isDevSession(s.session))!.session;
+        const warnings = JSON.stringify(observed?.data.warnings);
+        for (const rendered of [human.text, warnings]) {
+          expect(rendered).toContain("DOCSDESK_ENV_PROBE");
+          expect(rendered).toContain(`tmux set-environment -t ${devSession} -u DOCSDESK_ENV_PROBE`);
+          expect(rendered).not.toContain("synthetic-private-value");
+          expect(rendered).not.toContain("private unset fault");
         }
       });
     });
