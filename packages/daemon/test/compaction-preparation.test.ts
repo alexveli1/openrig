@@ -5,7 +5,7 @@ import {compactionRoutes} from '../src/routes/compaction.js';
 import {mkdtempSync, mkdirSync, writeFileSync, renameSync, rmSync, readFileSync, symlinkSync, lstatSync, statSync, utimesSync, chmodSync, existsSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join, dirname} from 'node:path';
-import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT, MANUAL_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
+import {ClaudeCompactionEnforcer, AUTO_PREP_WAIT_MS_DEFAULT, AUTO_RETRY_AFTER_STOP_MS_DEFAULT, MANUAL_PREP_WAIT_MS_DEFAULT} from '../src/domain/claude-compaction-enforcer.js';
 import {SessionTransport} from '../src/domain/session-transport.js';
 import {SeatDeliveryGuard} from '../src/domain/seat-delivery-guard.js';
 import {TmuxAdapter} from '../src/adapters/tmux.js';
@@ -67,6 +67,32 @@ for(const end of ['expiry','cancel','disable','replacement'])it(`${end} disarms;
  await f.e.maybeAutoCompact(input);await f.e.maybeAutoCompact(input);
  expect(compacts(f)).toHaveLength(0);expect(f.writes).toHaveLength(1);expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
  expect(existsSync(f.e.getPreparationState(seat)!.mapPath)).toBe(false);
+});
+for(const end of ['expiry','disable','replacement'])it(`after ${end}, automatic preparation starts again once the retry cooldown has passed`,async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);const first=f.e.getPreparationState(seat)!.attemptId;
+ await f.e.maybeAutoCompact({...input,usedPercentage:20});
+ if(end==='expiry')f.advance(AUTO_PREP_WAIT_MS_DEFAULT+1);
+ if(end==='disable')f.policy.enabled=false;
+ if(end==='replacement')f.generation('generation-two');
+ f.e.reconcilePreparations();f.policy.enabled=true;
+ await f.e.maybeAutoCompact(input);expect(f.writes).toHaveLength(1);
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT-1);await f.e.maybeAutoCompact(input);expect(f.writes).toHaveLength(1);
+ f.advance(1);await f.e.maybeAutoCompact(input);
+ const next=f.e.getPreparationState(seat)!;expect(next.attemptId).not.toBe(first);
+ expect(next).toMatchObject({mode:'automatic',status:'waiting',delivery:'delivered'});expect(f.writes).toHaveLength(2);expect(compacts(f)).toHaveLength(0);
+ stageMap(f);await f.e.maybeAutoCompact(input);expect(compacts(f)).toHaveLength(1);
+});
+it('an explicit cancel keeps automatic preparation off after the retry cooldown',async()=>{
+ const f=fixture();await f.e.maybeAutoCompact(input);f.e.cancelPreparation(seat);
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT+1);await f.e.maybeAutoCompact(input);
+ expect(f.writes).toHaveLength(1);expect(f.e.getPreparationState(seat)?.status).toBe('stopped');
+});
+it('a stopped manual preparation holds automatic preparation only until the retry cooldown has passed',async()=>{
+ const f=fixture();expect(await f.e.triggerManualCompact(input,{operatorInitiated:true})).toMatchObject({triggered:false,reason:'preparation_incomplete'});
+ expect(f.e.getPreparationState(seat)).toMatchObject({mode:'manual',status:'stopped'});
+ const sent=f.writes.length;await f.e.maybeAutoCompact(input);expect(f.writes).toHaveLength(sent);
+ f.advance(AUTO_RETRY_AFTER_STOP_MS_DEFAULT);await f.e.maybeAutoCompact(input);
+ expect(f.e.getPreparationState(seat)).toMatchObject({mode:'automatic',status:'waiting'});expect(f.writes).toHaveLength(sent+1);
 });
 it('deadline begins when prep delivery returns, not before its await',async()=>{
  const f=fixture();const original=f.tmux.sendKeys.getMockImplementation()!;f.tmux.sendKeys.mockImplementationOnce(async(...args)=>{f.advance(60000);return original(...args);});
