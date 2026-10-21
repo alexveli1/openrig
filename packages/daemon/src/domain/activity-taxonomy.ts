@@ -106,7 +106,7 @@ export interface RungDeclaration {
  *  never inherits its predecessor's rung authority. */
 export interface AdapterRungInventory {
   adapterId: string;
-  runtime: "claude-code" | "codex" | "tmux-generic" | "community-harness";
+  runtime: "claude-code" | "codex" | "tmux-generic" | "community-harness" | "opencode";
   rungs: RungDeclaration[];
 }
 
@@ -195,6 +195,25 @@ export const CODEX_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
   ],
 };
 
+/** Activity evidence for the opencode runtime (P-019, 2026-10-11, PO-approved).
+ *  opencode is a direct-CLI TUI runtime (no harness-in-a-pane shim), so the two
+ *  rungs are:
+ *   - `lifecycle-hooks`: the adapter types CLI commands straight into the seat
+ *     pane; each launch command is a lifecycle event the daemon can attribute.
+ *   - `window-sampling`: periodic tmux-pane capture samples the live TUI to
+ *     detect activity between lifecycle events.
+ *  Both are `full`/`authoritative`: the daemon controls both signals end to
+ *  end (it types the commands and owns the capture) — no external attester
+ *  needed. */
+export const OPENCODE_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
+  adapterId: "opencode-activity-hook",
+  runtime: "opencode",
+  rungs: [
+    { rung: "lifecycle-hooks", lifecycleCoverage: "full", initialTrust: "authoritative" },
+    { rung: "window-sampling", lifecycleCoverage: "full", initialTrust: "authoritative" },
+  ],
+};
+
 /** The generic tmux floor: sampling only — exactly what an undeclared seat gets. */
 export const TMUX_GENERIC_RUNG_INVENTORY: AdapterRungInventory = {
   adapterId: "tmux-generic",
@@ -216,6 +235,7 @@ export const COMMUNITY_HARNESS_RUNG_INVENTORY: AdapterRungInventory = {
 export function runtimeRungInventory(runtime: string | null, communityHarness?: string | null): AdapterRungInventory {
   if (runtime === "claude-code") return CLAUDE_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "codex") return CODEX_ACTIVITY_RUNG_INVENTORY;
+  if (runtime === "opencode") return OPENCODE_ACTIVITY_RUNG_INVENTORY;
   if (communityHarnessOf(communityHarness, runtime)) return COMMUNITY_HARNESS_RUNG_INVENTORY;
   return TMUX_GENERIC_RUNG_INVENTORY;
 }

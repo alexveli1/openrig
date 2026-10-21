@@ -64,12 +64,18 @@ describe("ClaimService FR-3 — adoption-boundary resume-token capture", () => {
 
   afterEach(() => { db.close(); });
 
-  function buildService(): ClaimService {
+  function buildService(extra?: {
+    opencodeSessionStore?: {
+      readSessionId(n: string): Promise<{ ok: true; sessionId: string } | { ok: false; reason: string }>;
+      readSessionIdForCwd?(cwd: string | null, minTimeCreatedMs?: number | null): Promise<{ ok: true; sessionId: string } | { ok: false; reason: string }>;
+    };
+  }): ClaimService {
     return new ClaimService({
       db, rigRepo, sessionRegistry, discoveryRepo, eventBus, tmuxAdapter: mockTmux,
       contextUsageStore: { readSidecar: readSidecar as unknown as (n: string) => SidecarResult },
       resumeTokenCapturer: { captureCodexThreadId: captureCodexThreadId as unknown as (n: string) => Promise<string | undefined> },
       ...(claudeProcessStartedAt ? { claudeProcessStartedAt } : {}),
+      ...extra,
     });
   }
 
@@ -155,6 +161,44 @@ describe("ClaimService FR-3 — adoption-boundary resume-token capture", () => {
     expect(tokenRow(node.id)).toMatchObject({ resume_type: "omp_session_file", resume_token: sessionFile, resume_provenance: "adoption" });
     expect(ompRead).toHaveBeenCalledOnce();
     expect(piRead).not.toHaveBeenCalled();
+  });
+
+  it("bind captures an OpenCode resume token from the session store (provenance=adoption)", async () => {
+    const rig = rigRepo.createRig("test-rig");
+    const node = rigRepo.addNode(rig.id, "dev.owner", { runtime: "opencode", cwd: "/projects/app" });
+    const discovered = seedDiscovery({ runtimeHint: "opencode", tmuxSession: "dev-owner@test-rig" });
+
+    const result = await buildService({
+      opencodeSessionStore: { readSessionId: async () => ({ ok: true as const, sessionId: "ses_f3bb408d9ffeA9wfnyVhkcmv6C" }) },
+    }).bind({ discoveredId: discovered.id, rigId: rig.id, logicalId: "dev.owner" });
+    expect(result.ok).toBe(true);
+
+    const row = tokenRow(node.id);
+    expect(row.resume_token).toBe("ses_f3bb408d9ffeA9wfnyVhkcmv6C");
+    expect(row.resume_type).toBe("opencode_session_id");
+    expect(row.resume_provenance).toBe("adoption");
+  });
+
+  it("reconcileSession routes opencode adoption capture through the cwd-scoped read", async () => {
+    const { node } = seedDetachedManagedSeat("opencode", "dev-driver@test-rig");
+    const readSessionId = vi.fn(async () => ({ ok: true as const, sessionId: "ses_globalnewest" }));
+    const readSessionIdForCwd = vi.fn(async (cwd: string | null) => {
+      expect(cwd).toBe("/projects/app");
+      return { ok: true as const, sessionId: "ses_f3bb408d9ffeA9wfnyVhkcmv6C" };
+    });
+
+    const result = await buildService({
+      opencodeSessionStore: { readSessionId, readSessionIdForCwd },
+    }).reconcileSession({ sessionName: "dev-driver@test-rig" });
+    expect(result.ok).toBe(true);
+
+    expect(readSessionId).not.toHaveBeenCalled();
+    expect(readSessionIdForCwd).toHaveBeenCalledOnce();
+    expect(tokenRow(node.id)).toMatchObject({
+      resume_type: "opencode_session_id",
+      resume_token: "ses_f3bb408d9ffeA9wfnyVhkcmv6C",
+      resume_provenance: "adoption",
+    });
   });
 
   it("bind honest-skips when the Claude sidecar is missing (no token persisted, skip event with reason)", async () => {

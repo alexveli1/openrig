@@ -13,6 +13,7 @@ const RUNTIME_COMMANDS: Record<string, string> = {
   "codex": "codex --version",
   "pi": "pi --version",
   "omp": "omp --version",
+  "opencode": "opencode --version",
 };
 
 interface RigSpecPreflightDeps {
@@ -423,6 +424,7 @@ export async function preflightValidatedSpec(rigSpec: PodRigSpec, preflightCtx: 
     const piErrors = await verifyPiRuntimeAvailable(rigSpec, preflightCtx.exec, warnings);
     errors.push(...piErrors);
     errors.push(...await verifyOmpRuntimeAvailable(rigSpec, preflightCtx.exec));
+    errors.push(...await verifyOpencodeRuntimeAvailable(rigSpec, preflightCtx.exec));
   }
 
   // §6 RECONCILIATION — WARNING EMISSION ORDER (PM ruling 2026-08-05): ACTIVITY-HOOK-FIRST,
@@ -488,6 +490,23 @@ export async function verifyOmpRuntimeAvailable(rigSpec: PodRigSpec, exec: ExecF
     const timedOut = runtimeProbeTimeout(err);
     if (timedOut) return [timedOut];
     return [`Runtime "omp" not available ('omp --version' failed: ${runtimeProbeFailure(err)}). If OMP is not installed, install Oh My Pi and ensure 'omp' is on PATH.`];
+  }
+}
+
+/**
+ * spec declares any `runtime: "opencode"` member, verify the `opencode`
+ * binary answers `opencode --version`. Returns a single what/why/fix error
+ * on failure.
+ */
+export async function verifyOpencodeRuntimeAvailable(rigSpec: PodRigSpec, exec: ExecFn): Promise<string[]> {
+  if (!rigSpec.pods.some((pod) => pod.members.some((member) => member.runtime === "opencode"))) return [];
+  try {
+    await exec(RUNTIME_COMMANDS["opencode"]!);
+    return [];
+  } catch (err) {
+    const timedOut = runtimeProbeTimeout(err);
+    if (timedOut) return [timedOut];
+    return [`Runtime "opencode" not available ('opencode --version' failed: ${runtimeProbeFailure(err)}). The spec declares an opencode member, so the launch would fail. Fix: install the OpenCode CLI and ensure 'opencode' is on PATH.`];
   }
 }
 

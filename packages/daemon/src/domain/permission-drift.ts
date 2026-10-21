@@ -114,11 +114,22 @@ export function observeOmpApprovalMode(arg: string): AppliedLaunchObservation {
   return { runtime: "omp", axis: "permission", state: "unknown", value: null, reason: "unrecognized_launch_argument" };
 }
 
+export function observeOpencodeApproval(postureArg: string): AppliedLaunchObservation {
+  if (postureArg.trim() === "--auto") {
+    return { runtime: "opencode", axis: "permission", state: "observed", value: "autoApprove" };
+  }
+  if (postureArg.trim() === "") {
+    return { runtime: "opencode", axis: "permission", state: "observed", value: "default" };
+  }
+  return { runtime: "opencode", axis: "permission", state: "unknown", value: null, reason: "unrecognized_launch_argument" };
+}
+
 function runtimeCommand(runtime: string): string | null {
   if (runtime === "claude-code") return "claude";
   if (runtime === "codex") return "codex";
   if (runtime === "pi") return "pi";
   if (runtime === "omp") return "omp";
+  if (runtime === "opencode") return "opencode";
   return null;
 }
 

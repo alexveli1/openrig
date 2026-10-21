@@ -641,7 +641,23 @@ export class TmuxAdapter {
       return { ok: false, code: "guard_lease_required", message: "Managed launch requires a lifecycle lease before terminal creation." };
     }
     const result = await this.createSessionUnchecked(name, cwd, env);
+    if (!result.ok && result.code === "duplicate_session") {
+      // Adopt-already-running (tmux layer): the name is already owned by a
+      // live tmux session — the occupant outlived the daemon's records
+      // (daemon restart / instance switch). Bind to the existing session
+      // instead of failing: the runtime adapter's adopt guard then takes
+      // over a live agent pane WITHOUT typing into it, and a genuinely
+      // stale shell can still receive a fresh launch. Failing here turned
+      // every daemon restart into a fleet-wide "needs you" (the launcher
+      // hit duplicate_session on the seat's own live session and aborted).
+      if (await this.hasSession(name)) {
+        return { ok: true };
+      }
+    }
     if (result.ok && this.deliveryGuard && env?.OPENRIG_NODE_ID) {
+      // Fresh-created sessions only: an adopted pre-existing session is not
+      // registered as fresh-managed (its pane was created by the previous
+      // occupant's generation).
       try {
         const panes = await this.listPanes(name);
         if (panes.length === 1) {

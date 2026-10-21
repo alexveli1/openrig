@@ -91,6 +91,8 @@ interface ClaimServiceDeps {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
   };
   ompRunnerStateStore?: ResumeTokenCaptureDeps["ompRunnerStateStore"];
+  /** OpenCode session-id reader (opencode.db query) for OpenCode resume-token capture. */
+  opencodeSessionStore?: ResumeTokenCaptureDeps["opencodeSessionStore"];
 }
 
 interface BindOptions {
@@ -127,6 +129,7 @@ export class ClaimService {
   private resumeTokenCapturer: ClaimServiceDeps["resumeTokenCapturer"] | null;
   private piRunnerStateStore: ClaimServiceDeps["piRunnerStateStore"] | null;
   private ompRunnerStateStore: ClaimServiceDeps["ompRunnerStateStore"] | null;
+  private opencodeSessionStore: ClaimServiceDeps["opencodeSessionStore"] | null;
 
   constructor(deps: ClaimServiceDeps) {
     if (deps.db !== deps.rigRepo.db) throw new Error("ClaimService: rigRepo must share the same db handle");
@@ -147,6 +150,7 @@ export class ClaimService {
     this.resumeTokenCapturer = deps.resumeTokenCapturer ?? null;
     this.piRunnerStateStore = deps.piRunnerStateStore ?? null;
     this.ompRunnerStateStore = deps.ompRunnerStateStore ?? null;
+    this.opencodeSessionStore = deps.opencodeSessionStore ?? null;
   }
 
   private async observeBindingPane(
@@ -246,15 +250,15 @@ export class ClaimService {
    * adoption (PRD Rule 7).
    */
   private async captureResumeTokenOnAdoption(input: {
-    rigId: string; nodeId: string; sessionId: string; sessionName: string; runtime: string | null;
+    rigId: string; nodeId: string; sessionId: string; sessionName: string; runtime: string | null; cwd?: string | null;
   }): Promise<void> {
     try {
       // Derivation is the shared PURE helper (OPR.0.4.3.04 B2 — reused by the
       // seat-handover discovered-mode capture); persistence + events stay here so
       // FR-3's adoption provenance/audit semantics are unchanged.
       const derived = await deriveResumeToken(
-        { runtime: input.runtime, sessionName: input.sessionName },
-        { contextUsageStore: this.contextUsageStore, claudeProcessStartedAt: this.claudeProcessStartedAt, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore, ompRunnerStateStore: this.ompRunnerStateStore },
+        { runtime: input.runtime, sessionName: input.sessionName, cwd: input.cwd ?? null },
+        { contextUsageStore: this.contextUsageStore, claudeProcessStartedAt: this.claudeProcessStartedAt, resumeTokenCapturer: this.resumeTokenCapturer, piRunnerStateStore: this.piRunnerStateStore, ompRunnerStateStore: this.ompRunnerStateStore, opencodeSessionStore: this.opencodeSessionStore },
       );
       if (derived.outcome === "exempt" || derived.outcome === "noop") return;
       const runtime = input.runtime as string; // non-null past exempt
@@ -398,7 +402,7 @@ export class ClaimService {
       // OPR.0.4.3.20 FR-3 — capture the resume token at the adoption boundary.
       await this.captureResumeTokenOnAdoption({
         rigId: opts.rigId, nodeId, sessionId, sessionName: discovered.tmuxSession,
-        runtime: node.runtime ?? discoveredRuntime ?? null,
+        runtime: node.runtime ?? discoveredRuntime ?? null, cwd: node.cwd ?? discovered.cwd ?? null,
       });
 
       return { ok: true, nodeId, sessionId };
@@ -602,7 +606,7 @@ export class ClaimService {
       // (FR-3 captures a token, it does not assert conversation continuity).
       await this.captureResumeTokenOnAdoption({
         rigId: nodeRow.rig_id, nodeId: nodeRow.id, sessionId, sessionName,
-        runtime: nodeRow.runtime,
+        runtime: nodeRow.runtime, cwd: nodeRow.cwd ?? null,
       });
 
       return {
@@ -829,7 +833,7 @@ export class ClaimService {
       // OPR.0.4.3.20 FR-3 — capture the resume token at the adoption boundary.
       await this.captureResumeTokenOnAdoption({
         rigId: opts.rigId, nodeId, sessionId, sessionName: discovered.tmuxSession,
-        runtime: discoveredRuntime ?? null,
+        runtime: discoveredRuntime ?? null, cwd: discovered.cwd ?? null,
       });
 
       return { ok: true, nodeId, sessionId };

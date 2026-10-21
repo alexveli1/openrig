@@ -108,7 +108,16 @@ export type HarnessLaunchResult =
     launchedProcess?: import("./native-process-lineage.js").ClaudeLaunchedProcess;
     /** Codex (#1524): the native process a managed resume was proven on from Codex's own records. Restore's join
      *  compares the process it verifies later against this one before it reports the seat resumed. */
-    resumedProcess?: { pid: number; startedAt: string } }
+    resumedProcess?: { pid: number; startedAt: string };
+    // `adopted: true` (OpenCode): the runtime already owned a live, authenticated pane at launch time; the adapter
+    // recorded the launch observation and captured a best-effort resume token WITHOUT typing anything into the pane.
+    // The orchestrator must short-circuit all pane-input delivery for adopted launches (typing a fresh prompt into a
+    // running TUI stages it into the live agent's input — corruption).
+    adopted?: boolean;
+    // `initialPromptDelivered: true` (OpenCode fresh launch, DEC-1): the startup brief rode the launch command as
+    // `--prompt`; the orchestrator must NOT re-deliver the folded components (session identity, first send_text file,
+    // after_ready role brief) interactively.
+    initialPromptDelivered?: boolean }
   // `evidence` carries the last-N pane lines for `attention_required` outcomes
   // so the failure can flow honest evidence through to RestoreNodeResult's
   // attentionEvidence field. Omitted for non-attention recoveries.

@@ -37,6 +37,15 @@ export interface ResumeTokenCaptureDeps {
   ompRunnerStateStore?: {
     readSessionFile(sessionName: string): { ok: true; sessionFile: string } | { ok: false; reason: string };
   } | null;
+  /** OpenCode session-id reader (the OpenCode adapter exposes it; backed by
+   *  a read-only query of the opencode.db `session` table — a read, same
+   *  posture as the claude-code status-line sidecar). Absent = silent no-op.
+   *  `readSessionIdForCwd` is the seat-precise variant (rows key on
+   *  directory); preferred whenever the caller knows the seat cwd. */
+  opencodeSessionStore?: {
+    readSessionId(sessionName: string): Promise<{ ok: true; sessionId: string } | { ok: false; reason: string }>;
+    readSessionIdForCwd?(cwd: string | null): Promise<{ ok: true; sessionId: string } | { ok: false; reason: string }>;
+  } | null;
 }
 
 export type ResumeTokenDeriveResult =
@@ -81,7 +90,7 @@ export async function isClaudeSidecarFromEarlierProcess(
  * caller's to swallow (capture must never fail or block its lifecycle op).
  */
 export async function deriveResumeToken(
-  input: { runtime: string | null; sessionName: string },
+  input: { runtime: string | null; sessionName: string; cwd?: string | null },
   deps: ResumeTokenCaptureDeps,
 ): Promise<ResumeTokenDeriveResult> {
   const resumeType = resumeTypeForRuntime(input.runtime);
@@ -119,6 +128,20 @@ export async function deriveResumeToken(
       return { outcome: "skipped", reason: state.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
     }
     if (state.sessionFile.trim().length > 0) token = state.sessionFile.trim();
+    else return { outcome: "skipped", reason: "missing_sidecar" };
+  } else if (runtime === "opencode") {
+    if (!deps.opencodeSessionStore) return { outcome: "noop" }; // dep absent — silent no-op
+    // Prefer the cwd-scoped read when the caller knows the seat cwd: rows
+    // key on directory, so multi-seat rigs sharing a HOME store stay
+    // seat-precise. Without a cwd, fall back to the global-newest read.
+    const scoped = input.cwd ? deps.opencodeSessionStore.readSessionIdForCwd : undefined;
+    const state = scoped
+      ? await scoped.call(deps.opencodeSessionStore, input.cwd ?? null)
+      : await deps.opencodeSessionStore.readSessionId(input.sessionName);
+    if (!state.ok) {
+      return { outcome: "skipped", reason: state.reason === "parse_error" ? "parse_error" : "missing_sidecar" };
+    }
+    if (state.sessionId.trim().length > 0) token = state.sessionId.trim();
     else return { outcome: "skipped", reason: "missing_sidecar" };
   } else {
     return { outcome: "noop" }; // resumeType set but runtime is not one we derive — defensive

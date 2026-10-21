@@ -44,6 +44,10 @@ import {
   CodexInPlaceRestart, type InPlaceCodexLauncher, type InPlaceRestartIo, type InPlaceRestartRefusal,
   type InPlaceRestartReport, type InPlaceRestartTarget, type InPlaceVerifyResult,
 } from "./seat-restart-in-place.js";
+import {
+  OpencodeInPlaceRestart, readOpencodeResumeToken,
+  type OpencodeInPlaceLauncher, type OpencodeRestartRefusal, type OpencodeRestartReport, type OpencodeRestartTarget,
+} from "./seat-restart-in-place-opencode.js";
 import { CommunityHarnessRuntimeAdapter, seatAdapter } from "../adapters/community-harness-runtime-adapter.js";
 import { sessionCommunityHarnessSelect } from "./session-registry.js";
 
@@ -132,13 +136,14 @@ export interface SeatRefusal {
     | "invalid_effort"
     | "effort_unsupported_runtime"
     | "effort_unavailable"
+    | "verify_unsupported_runtime"
     | "invalid_policy";
   message: string;
   guidance?: string;
   matches?: Array<{ rig_name: string; logical_id: string; current_occupant: string | null }>;
 }
 
-export type RestartInPlaceResult = InPlaceRestartReport | InPlaceRestartRefusal | SeatRefusal;
+export type RestartInPlaceResult = InPlaceRestartReport | OpencodeRestartReport | InPlaceRestartRefusal | OpencodeRestartRefusal | SeatRefusal;
 export type VerifyRestartInPlaceResult = InPlaceVerifyResult | SeatRefusal;
 
 export interface SeatDescriptor {
@@ -1457,6 +1462,19 @@ export class SeatLifecycleService {
     }
     const resolved = this.resolveSeat(input.seatRef);
     if ("code" in resolved) return resolved;
+    // opencode restarts re-read the seat's opencode.json on a same-session relaunch; the Codex
+    // restart path (with its account/home/rollout machinery) is unchanged below.
+    if (this.seatRuntime(resolved) === "opencode") {
+      const opencode = this.opencodeRestarter();
+      if ("code" in opencode) return opencode;
+      const run = async (): Promise<RestartInPlaceResult> => {
+        const target = await this.inPlaceTarget(resolved, input.seatRef);
+        if ("code" in target) return target;
+        return opencode.execute(this.toOpencodeTarget(target), { plan: input.plan });
+      };
+      const ocGuard = this.tmuxAdapter.deliveryGuard;
+      return ocGuard && !ocGuard.ownsLifecycle(resolved.nodeId) ? ocGuard.lifecycle([resolved.nodeId], run) : run();
+    }
     const prepared = this.inPlaceRestarter();
     if ("code" in prepared) return prepared;
     if (input.plan) {
@@ -1479,6 +1497,9 @@ export class SeatLifecycleService {
   async verifyRestartInPlace(input: { seatRef: string; expectAccount?: string | null }): Promise<VerifyRestartInPlaceResult> {
     const resolved = this.resolveSeat(input.seatRef);
     if ("code" in resolved) return resolved;
+    if (this.seatRuntime(resolved) === "opencode") {
+      return { ok: false, code: "verify_unsupported_runtime", message: `Seat "${input.seatRef}" is opencode; --verify (account/moved evidence) applies to Codex seats only. An opencode restart reports success as outcome "restarted".` };
+    }
     const prepared = this.inPlaceRestarter();
     if ("code" in prepared) return prepared;
     const target = await this.inPlaceTarget(resolved, input.seatRef);
@@ -1498,13 +1519,43 @@ export class SeatLifecycleService {
     });
   }
 
+  /** The seat's declared runtime, or null when the node is gone. */
+  private seatRuntime(resolved: ResolvedSeat): string | null {
+    const seat = this.describe(resolved);
+    return this.rigRepo.getRig(seat.rigId)?.nodes.find((candidate) => candidate.id === seat.nodeId)?.runtime ?? null;
+  }
+
+  /** The opencode restarter, built from the opencode adapter's resume surface, or a refusal when it is absent. */
+  private opencodeRestarter(): OpencodeInPlaceRestart | SeatRefusal {
+    const adapter = this.runtimeAdapters["opencode"] as (RuntimeAdapter & Partial<OpencodeInPlaceLauncher>) | undefined;
+    if (!adapter?.buildResumeCommand || !adapter.verifyResumeInPane || !adapter.sendResumeCommand) {
+      return { ok: false, code: "runtime_adapter_missing", message: "The opencode runtime adapter with in-place resume is unavailable in this daemon." };
+    }
+    if (!this.listProcesses) {
+      return { ok: false, code: "runtime_adapter_missing", message: "The process observer is unavailable in this daemon, so a running opencode client cannot be identified; in-place restart refused." };
+    }
+    return new OpencodeInPlaceRestart({
+      db: this.db, tmux: this.tmuxAdapter, opencode: adapter as OpencodeInPlaceLauncher,
+      listProcesses: this.listProcesses, timing: this.inPlaceRestartTiming,
+    });
+  }
+
+  /** Reshape the shared in-place target into the opencode one, reading the seat's opencode session id. */
+  private toOpencodeTarget(target: InPlaceRestartTarget): OpencodeRestartTarget {
+    return {
+      seat: target.seat, sessionName: target.sessionName,
+      resumeToken: readOpencodeResumeToken(this.db, target.sessionId) ?? "",
+      binding: target.binding,
+    };
+  }
+
   /** The shared seat refusals, then the binding the relaunch is built from (the handover's posture rules). */
   private async inPlaceTarget(resolved: ResolvedSeat, seatRef: string): Promise<InPlaceRestartTarget | SeatRefusal> {
     const seat = this.describe(resolved);
     const node = this.rigRepo.getRig(seat.rigId)?.nodes.find((candidate) => candidate.id === seat.nodeId);
     if (!node) return { ok: false, code: "seat_not_found", message: `Seat "${seatRef}" no longer exists.`, guidance: SEAT_LOOKUP_GUIDANCE };
-    if (node.runtime !== "codex") {
-      return { ok: false, code: "not_codex", message: `Seat "${seatRef}" runs ${node.runtime ?? "an unknown runtime"}; in-place restart supports Codex seats only.` };
+    if (node.runtime !== "codex" && node.runtime !== "opencode") {
+      return { ok: false, code: "not_codex", message: `Seat "${seatRef}" runs ${node.runtime ?? "an unknown runtime"}; in-place restart supports Codex and opencode seats only.` };
     }
     const preference = this.tmuxAdapter.deliveryGuard?.preference(node.id);
     if (preference?.effective || preference?.desired) {
@@ -1529,7 +1580,7 @@ export class SeatLifecycleService {
     }
     let permissionOverride: ReturnType<NativePermissionStore["launchOverride"]>;
     try {
-      permissionOverride = new NativePermissionStore(this.db).launchOverride(node.id, "codex");
+      permissionOverride = new NativePermissionStore(this.db).launchOverride(node.id, node.runtime ?? "codex");
     } catch (error) {
       return { ok: false, code: "permission_selection_refused", message: `Permission selection: ${(error as Error).message}` };
     }

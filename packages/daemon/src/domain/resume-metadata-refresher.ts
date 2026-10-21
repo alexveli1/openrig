@@ -28,6 +28,16 @@ export interface ResumeRefreshSession {
   resumeType: string | null;
   resumeToken: string | null;
   cwd?: string | null;
+  /** sessions.created_at ("YYYY-MM-DD HH:MM:SS" UTC) — bounds store reads
+   *  to rows created after the seat, so a delayed row insert can never
+   *  resolve to a stale previous-generation session. */
+  sessionCreatedAt?: string | null;
+  /** Same value, the name used by registry-derived sessions
+   *  (`getLatestLiveSessions` exposes `createdAt`, not `sessionCreatedAt`).
+   *  The refresher prefers `sessionCreatedAt` and falls back to this,
+   *  so both construction sites bound store reads (deepcool dist patch,
+   *  2026-10-04). */
+  createdAt?: string | null;
 }
 
 interface ResumeMetadataRefresherDeps {
@@ -53,6 +63,24 @@ interface ResumeMetadataRefresherDeps {
   /** Provider root used by the daemon's Claude launches; no scan of other homes. */
   claudeConfigDir?: string;
   listClaudeProcesses?: NativeProcessLister;
+  /** OpenCode session-id reader for null-fill of an OpenCode seat's resume token
+   *  from live state during snapshot refresh. Cwd-scoped (opencode.db `session`
+   *  rows key on directory), so multi-seat rigs sharing a HOME store stay
+   *  seat-precise. Optional + structurally typed (older wirings/tests omit it →
+   *  no refresher branch: its store read is global-newest (no seat key), so
+   *  opencode tokens are captured at fresh-launch time and on the adoption
+   *  boundary instead). */
+  opencodeSessionStore?: {
+    readSessionIdForCwd(cwd: string | null, minTimeCreatedMs?: number | null): Promise<{ ok: true; sessionId: string } | { ok: false; reason: string }>;
+  };
+}
+
+/** Parse a sessions.created_at ("YYYY-MM-DD HH:MM:SS", UTC) to epoch ms.
+ *  Returns null when unparseable — the caller skips the bounded read. */
+export function parseSessionCreatedAtMs(value: string | null | undefined): number | null {
+  if (typeof value !== "string" || value.trim().length === 0) return null;
+  const ms = Date.parse(`${value.trim().replace(" ", "T")}Z`);
+  return Number.isFinite(ms) ? ms : null;
 }
 
 export class ResumeMetadataRefresher {
@@ -71,6 +99,7 @@ export class ResumeMetadataRefresher {
   private claudeProcessStartedAt: ResumeMetadataRefresherDeps["claudeProcessStartedAt"] | null;
   private claudeConfigDir: string;
   private listClaudeProcesses: NativeProcessLister | undefined;
+  private opencodeSessionStore: ResumeMetadataRefresherDeps["opencodeSessionStore"] | null;
 
   constructor(deps: ResumeMetadataRefresherDeps) {
     this.sessionRegistry = deps.sessionRegistry;
@@ -98,6 +127,7 @@ export class ResumeMetadataRefresher {
     this.claudeProcessStartedAt = deps.claudeProcessStartedAt ?? null;
     this.claudeConfigDir = deps.claudeConfigDir ?? process.env.CLAUDE_CONFIG_DIR ?? nodePath.join(this.homeDir, ".claude");
     this.listClaudeProcesses = deps.listClaudeProcesses;
+    this.opencodeSessionStore = deps.opencodeSessionStore ?? null;
   }
 
   /**
@@ -227,6 +257,34 @@ export class ResumeMetadataRefresher {
         // token stays put — a rolled-but-present token is no longer silently
         // nulled; FR-7's rollback catches an actually-unresumable token at restore.
         this.sessionRegistry.markResumeProbeResult(session.sessionId, probe);
+      }
+      if (session.runtime === "opencode") {
+        // Null-fill from the cwd-scoped opencode.db read (pure sqlite read,
+        // no probe/spawn — same lightweight posture as the Claude/Codex
+        // branches). `scrape` provenance fills a null slot and never
+        // clobbers a higher-trust token (the FR-3 rank guard).
+        const store = this.opencodeSessionStore;
+        if (!store) continue; // unwired — silent no-op (older wirings/tests)
+        if (!session.cwd) continue; // no cwd → global-latest is not seat-precise
+        // Launch boundary: only rows created after the seat qualify, so a
+        // delayed insert (first prompt) can never resolve to a stale
+        // previous-generation session. Unknown boundary → skip the read.
+        const minTime = parseSessionCreatedAtMs(session.sessionCreatedAt ?? session.createdAt);
+        if (minTime === null) continue;
+        if (session.resumeToken) {
+          if (fillNullOnly) {
+            const current = await store.readSessionIdForCwd(session.cwd, minTime).catch(() => null);
+            if (current?.ok && current.sessionId === session.resumeToken) {
+              this.sessionRegistry.markResumeProbeResult(session.sessionId, "resumable");
+            }
+          }
+          continue;
+        }
+        const found = await store.readSessionIdForCwd(session.cwd, minTime).catch(() => null);
+        if (found?.ok && found.sessionId.trim().length > 0) {
+          this.sessionRegistry.updateResumeToken(session.sessionId, "opencode_session_id", found.sessionId.trim(), "scrape");
+        }
+        continue;
       }
     }
   }

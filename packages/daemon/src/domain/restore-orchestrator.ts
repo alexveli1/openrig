@@ -186,6 +186,7 @@ interface RestoreOrchestratorDeps {
    *  resume without the adapter falls through to the honest no-adapter error. */
   piResume?: PiResumeAdapter;
   ompResume?: OmpResumeAdapter;
+  opencodeResume?: import("../adapters/opencode-resume.js").OpencodeResumeAdapter;
   transcriptStore?: TranscriptStore;
   serviceOrchestrator?: import("./service-orchestrator.js").ServiceOrchestrator;
   listProcesses?: () => Promise<Array<{ pid: number; ppid: number; command: string }>>;
@@ -205,6 +206,7 @@ export class RestoreOrchestrator {
   private codexResume: CodexResumeAdapter;
   private piResume: PiResumeAdapter | null;
   private ompResume: OmpResumeAdapter | null;
+  private opencodeResume: import("../adapters/opencode-resume.js").OpencodeResumeAdapter | null;
   private transcriptStore: TranscriptStore | null;
   private serviceOrchestrator: import("./service-orchestrator.js").ServiceOrchestrator | null;
   private listProcesses: (() => Promise<Array<{ pid: number; ppid: number; command: string }>>) | undefined;
@@ -245,6 +247,7 @@ export class RestoreOrchestrator {
     this.codexResume = deps.codexResume;
     this.piResume = deps.piResume ?? null;
     this.ompResume = deps.ompResume ?? null;
+    this.opencodeResume = deps.opencodeResume ?? null;
     this.transcriptStore = deps.transcriptStore ?? null;
     this.serviceOrchestrator = deps.serviceOrchestrator ?? null;
     this.listProcesses = deps.listProcesses;
@@ -1906,6 +1909,22 @@ export class RestoreOrchestrator {
     }
     if (this.ompResume?.canResume(resumeType, resumeToken)) {
       const result = await this.ompResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
+      if (result.ok) {
+        if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
+        return { kind: "resumed" };
+      }
+      if (result.code === "retry_fresh") return { kind: "retry_fresh" };
+      if (result.code === "attention_required") {
+        return { kind: "attention_required", message: result.message, evidence: (result as { evidence?: string }).evidence };
+      }
+      return { kind: "failed", message: result.message };
+    }
+
+    // OpenCode — honest exact-id continuation (`opencode <cwd> --session
+    // <id>`). A dead id returns retry_fresh (the awaiting-decision
+    // stop-and-ask), never a silent fresh start.
+    if (this.opencodeResume?.canResume(resumeType, resumeToken)) {
+      const result = await this.opencodeResume.resume(sessionName, resumeType, resumeToken, cwd, model, resolvedPosture);
       if (result.ok) {
         if (result.appliedLaunch && launchGeneration) this.appliedLaunchStore.recordGeneration(launchGeneration, result.appliedLaunch);
         return { kind: "resumed" };

@@ -381,9 +381,24 @@ describe("TmuxAdapter", () => {
       expect(cmd).toBe("tmux new-session -d -s 'r01-test' -c '/tmp' -e 'OPENRIG_TRANSCRIPTS_LINES=' -e 'OPENRIG_TRANSCRIPTS_POLL_INTERVAL_SECONDS=' -P -F '#{pane_id}'");
     });
 
-    it("returns { ok: false, code: 'duplicate_session' } on duplicate", async () => {
+    it("adopts an existing live session on duplicate (ok, no freshManaged registration)", async () => {
       const err = new Error("duplicate session: r01-dev1-impl");
-      const adapter = new TmuxAdapter(mockExec({ "new-session": { error: err } }));
+      const adapter = new TmuxAdapter(mockExec({
+        "new-session": { error: err },
+        "has-session": { stdout: "" },
+      }));
+      const result = await adapter.createSession("r01-dev1-impl", "/tmp", {
+        OPENRIG_NODE_ID: "node-adopt",
+      });
+      expect(result.ok).toBe(true);
+    });
+
+    it("returns { ok: false, code: 'duplicate_session' } when the name is not actually live", async () => {
+      const err = new Error("duplicate session: r01-dev1-impl");
+      const adapter = new TmuxAdapter(mockExec({
+        "new-session": { error: err },
+        "has-session": { error: new Error("can't find session: r01-dev1-impl") },
+      }));
       const result = await adapter.createSession("r01-dev1-impl");
       expect(result.ok).toBe(false);
       if (!result.ok) {

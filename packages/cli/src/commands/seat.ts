@@ -571,7 +571,7 @@ identity remains unverified; a version number alone cannot clear it.
     // A restart that ran answers 200 with its outcome; only a verified replacement exits 0. Likewise
     // --verify answers 200 with its outcome, and only `moved` exits 0.
     const restartFailed = res.status < 400 && (
-      (path === "restart" && res.data["outcome"] !== "restarted_account_unverified")
+      (path === "restart" && res.data["outcome"] !== "restarted_account_unverified" && res.data["outcome"] !== "restarted")
       || (path === "restart-verify" && res.data["outcome"] !== "moved"));
     if (opts.json) {
       console.log(JSON.stringify(res.data, null, 2));
@@ -745,7 +745,7 @@ a compaction that runs before your next command.
 Before adopting, don't rig down/rig up or hand over by fork: those resume the
 existing conversation in the saved directory, and Claude keeps conversations per
 project directory, so a resume there may not find it (not run natively).
-rig seat restart --keep-conversation (Codex) isn't adoption: it respawns in the
+rig seat restart --keep-conversation (Codex, opencode) isn't adoption: it respawns in the
 directory it observes from the running process.
 
 Files in the old directory are left as they are; other seats may still use them.
@@ -860,6 +860,12 @@ Results: restarted_account_unverified, not_started (the original is still runnin
 incomplete (it exited; the resume was not proven; the pane may be held for recovery),
 native_unknown (what happened could not be observed). Only --verify reports moved,
 and only with a completed tool turn since the restart AND --expect-account matched.
+For opencode seats, an in-place restart respawns the seat on its own opencode session
+so it re-reads its seat-cwd opencode.json — this is how a seat-config change is applied
+without losing the conversation. opencode has no account/home model, so --verify and
+--expect-account do not apply; success outcome is "restarted". Outcomes: restarted,
+planned (--plan), not_started, incomplete, unknown. opencode restart verifies the resume
+by the TUI becoming active again (opencode has no native-process resume lineage).
 Examples:
   rig seat restart dev.impl --keep-conversation --plan --json
   rig seat restart dev-impl@my-rig --keep-conversation --reason "take the home's new account"
