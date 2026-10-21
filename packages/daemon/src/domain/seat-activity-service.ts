@@ -48,6 +48,9 @@ export interface SeatActivityServiceDeps {
   permissionPromptChanged?: (sessionName: string, confirmed: boolean, runtime: string) => void;
   /** Claude pid.json, consulted for seats declaring self-report. */
   selfReportReader?: (sessionName: string, seatNodeId: string) => ActivityEvidence | null;
+  /** A runner seat's last recorded hook, restored when its inventory is declared with no hook evidence yet (after a
+   *  daemon restart). Null when nothing qualifies: another generation or session, or nothing recorded. */
+  restoreHookEvidence?: (seat: { seatNodeId: string; sessionName: string }, runtime: string) => ActivityEvidence | null;
 }
 
 export interface PollSeatOptions {
@@ -69,6 +72,8 @@ export class SeatActivityService {
 
   private readonly selfReportReader: ((sessionName: string, seatNodeId: string) => ActivityEvidence | null) | null;
 
+  private readonly restoreHookEvidence: SeatActivityServiceDeps["restoreHookEvidence"] | null;
+
   constructor(deps: SeatActivityServiceDeps) {
     this.permissionPromptReader = deps.permissionPromptReader;
     this.permissionPromptChanged = deps.permissionPromptChanged;
@@ -77,6 +82,7 @@ export class SeatActivityService {
     this.eventBus = deps.eventBus ?? null;
     this.now = deps.now ?? (() => new Date());
     this.selfReportReader = deps.selfReportReader ?? null;
+    this.restoreHookEvidence = deps.restoreHookEvidence ?? null;
   }
 
   /**
@@ -286,6 +292,7 @@ export class SeatActivityService {
         const communityHarnessChanged = !!known && (known.inventory === COMMUNITY_HARNESS_RUNG_INVENTORY) !== (inventory === COMMUNITY_HARNESS_RUNG_INVENTORY);
         if (!known || known.inventory === null || known.sessionName !== r.session_name || communityHarnessChanged) {
           this.declareRungInventory({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
+          this.restoreDurableHook({ seatNodeId: r.node_id, sessionName: r.session_name }, inventory);
         }
       }
 
@@ -596,6 +603,18 @@ export class SeatActivityService {
       return evd;
     }
     return null;
+  }
+
+  /** A runner seat declared with no hook evidence (after a daemon restart) takes its last recorded hook, so an idle seat
+   *  that posts nothing still reads idle. Its seq is 0: any live hook outranks it. */
+  private restoreDurableHook(seat: { seatNodeId: string; sessionName: string }, inventory: AdapterRungInventory): void {
+    if (!this.restoreHookEvidence || !inventory.rungs.some((r) => r.rung === "lifecycle-hooks" && r.durableBoundaries)) return;
+    const ladder = this.ladder.get(seat.seatNodeId);
+    if (!ladder || this.latestByRung(ladder, "lifecycle-hooks")) return;
+    let evidence: ActivityEvidence | null = null;
+    try { evidence = this.restoreHookEvidence(seat, inventory.runtime); } catch { evidence = null; }
+    if (evidence && evidence.seatNodeId === seat.seatNodeId && evidence.sessionName === seat.sessionName
+        && evidence.rung === "lifecycle-hooks") this.reportEvidence({ ...evidence, seq: 0 });
   }
 
   /** Whether the seat's declared inventory says this rung's last boundary holds until the next one. */

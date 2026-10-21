@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
-import { isRunnerExit } from "../domain/agent-activity-store.js";
+import { hookEventState, isRunnerExit } from "../domain/agent-activity-store.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { verifyStartupProof } from "../domain/startup-proof.js";
@@ -66,6 +66,22 @@ export function evidenceFromHookActivity(input: {
     default:
       return null; // unknown = noise, never evidence
   }
+}
+
+/** A runner seat's last recorded hook as oracle evidence, for restoring after a daemon restart. Only the store's own
+ *  checks pass it: the seat's current session, and an occupant generation resolved as the live one. Past the store's
+ *  freshness window it means what its retained raw event means, as for the wake ladder: a runner's boundary holds. */
+export function restoredRunnerHookEvidence(
+  store: Pick<AgentActivityStore, "getLatestForNode">,
+  seat: { seatNodeId: string; sessionName: string },
+  runtime: string,
+): ActivityEvidence | null {
+  const latest = store.getLatestForNode({ nodeId: seat.seatNodeId, sessionName: seat.sessionName });
+  if (!latest || latest.evidenceSource !== "runtime_hook" || latest.generationProvenance !== "resolved") return null;
+  const state = !latest.stale ? latest.state
+    : latest.reason === "stale_runtime_hook" ? hookEventState(latest.rawEvent, latest.rawSubtype, runtime) : "unknown";
+  return evidenceFromHookActivity({ seatNodeId: seat.seatNodeId, sessionName: seat.sessionName, runtime,
+    activity: { ...latest, state }, seq: 0 });
 }
 
 /** The relay route a hook post names: "plugin" or "managed". An untagged post (an older relay) stays untagged; any

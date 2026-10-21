@@ -100,7 +100,10 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   decide working, idle and needs-input, and unlike Claude and Codex hooks a boundary holds
   until the next one instead of expiring after 15 s. The runner's report that its child
   exited reads unknown, not idle. A boundary the runner didn't see (if a runtime ended a turn
-  without `agent_end`) leaves the seat working until its next event, never idle.
+  without `agent_end`) leaves the seat working until its next event, never idle. After a
+  daemon restart, a runner seat takes its last recorded boundary from the hook store, for its
+  current session and occupant generation only, so an idle seat still reads idle before it
+  posts again.
 
 Partial-coverage honesty: a source with partial lifecycle coverage gets identity-only
 trust. The ladder is also the migration path — new oracles slot in above existing

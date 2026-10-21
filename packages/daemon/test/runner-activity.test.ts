@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { Hono } from "hono";
 import { createFullTestDb } from "./helpers/test-app.js";
 import { RigRepository } from "../src/domain/rig-repository.js";
@@ -6,7 +6,7 @@ import { SessionRegistry } from "../src/domain/session-registry.js";
 import { EventBus } from "../src/domain/event-bus.js";
 import { AgentActivityStore, hookEventState } from "../src/domain/agent-activity-store.js";
 import { SeatActivityService, HOOK_AUTHORITY_WINDOW_MS } from "../src/domain/seat-activity-service.js";
-import { activityRoutes } from "../src/routes/activity.js";
+import { activityRoutes, restoredRunnerHookEvidence } from "../src/routes/activity.js";
 import {
   CLAUDE_ACTIVITY_RUNG_INVENTORY,
   CODEX_ACTIVITY_RUNG_INVENTORY,
@@ -17,6 +17,7 @@ import {
 } from "../src/domain/activity-taxonomy.js";
 import { mapPiEvent } from "../src/adapters/pi-runner.js";
 import { diagnoseSeatParked } from "../src/domain/parked-query.js";
+import { createDaemon } from "../src/startup.js";
 
 // pi and omp seats read activity from their runners' own turn events, through the one activity service.
 // Every test posts what the runner posts for a runner event (mapPiEvent's hook), through the real route and recorder.
@@ -39,11 +40,13 @@ function fixture(runtime: "pi" | "omp") {
   const session = sessions.registerSession(node.id, "dev-a@runner-activity", "handover");
   sessions.updateStatus(session.id, "running");
   const eventBus = new EventBus(db);
-  const store = new AgentActivityStore({ db, eventBus,
+  const store = new AgentActivityStore({ db, eventBus, now: () => new Date(clock.now),
     resolveOccupantGeneration: id => sessions.currentOccupantTenure(id)?.generationUuid ?? null,
     isRegisteredOccupantGeneration: (id, generation) => sessions.isOccupantGenerationRegistered(id, generation) });
-  const oracle = new SeatActivityService({ tmux: { readPaneLastActivity: async () => null }, defaultWindowSeconds: 3,
-    now: () => new Date(clock.now) });
+  // The daemon's wiring: a new oracle (as after a restart) restores each runner seat's last hook from the store.
+  const newOracle = () => new SeatActivityService({ tmux: { readPaneLastActivity: async () => null }, defaultWindowSeconds: 3,
+    now: () => new Date(clock.now), restoreHookEvidence: (seat, seatRuntime) => restoredRunnerHookEvidence(store, seat, seatRuntime) });
+  let oracle = newOracle();
   oracle.declareRungInventory({ seatNodeId: node.id, sessionName: session.sessionName }, runtimeRungInventory(runtime));
   const app = new Hono();
   app.use("*", async (c, next) => {
@@ -52,6 +55,11 @@ function fixture(runtime: "pi" | "omp") {
     c.set("seatActivityService" as never, oracle as never);
     await next();
   });
+  /** A daemon restart: the in-memory ladder is gone; the first sweep declares the seat again. */
+  async function restart() {
+    oracle = newOracle();
+    await oracle.pollAllRunningTmuxSeats(db);
+  }
   app.route("/api/activity", activityRoutes);
   const generation = sessions.currentOccupantTenure(node.id)!.generationUuid;
   /** What the runner posts (its activityPayload) for a hook event. */
@@ -74,7 +82,7 @@ function fixture(runtime: "pi" | "omp") {
     listOpenObligations: () => ({ rows: [{ qitemId: "q-1", state: "pending" }] as never, limit: 500 }),
   } as never, { seatNodeId: node.id, sessionName: session.sessionName }).parked;
   expect(generation).not.toBe(oldGeneration);
-  return { post, runnerEvent, state, later, parked, oracle, node, session, oldGeneration };
+  return { post, runnerEvent, state, later, parked, restart, node, session, oldGeneration, sessions };
 }
 
 const PAST_HOOK_WINDOW = HOOK_AUTHORITY_WINDOW_MS + 60_000;
@@ -140,6 +148,76 @@ describe.each(["pi", "omp"] as const)("%s seat activity from its runner's turn e
     expect(f.state().activity).toBe("working");
     await f.post("Stop", "agent_end", { sessionName: "dev-a-old@runner-activity", nodeId: undefined, generation: f.oldGeneration });
     expect(f.state().activity).toBe("working");
+  });
+});
+
+describe.each(["pi", "omp"] as const)("%s seat after a daemon restart", (runtime) => {
+  it("an idle seat holding work comes back idle and parked, even long past the store's freshness window", async () => {
+    const f = fixture(runtime);
+    await f.runnerEvent({ type: "agent_start" });
+    await f.runnerEvent({ type: "agent_end" });
+    f.later(60 * 60 * 1000); // an hour idle, then the daemon restarts
+    await f.restart();
+    expect(f.state()).toMatchObject({ activity: "idle-at-prompt", decidedBy: "lifecycle-hooks" });
+    expect(f.parked()).toBe(true);
+  });
+
+  it("a seat mid-turn comes back working, and its first live event still decides", async () => {
+    const f = fixture(runtime);
+    await f.runnerEvent({ type: "agent_start" });
+    await f.restart();
+    expect(f.state().activity).toBe("working");
+    await f.runnerEvent({ type: "agent_end" });
+    expect(f.state().activity).toBe("idle-at-prompt");
+  });
+
+  it("a seat whose runner exited comes back unknown, not idle", async () => {
+    const f = fixture(runtime);
+    await f.runnerEvent({ type: "agent_end" });
+    await f.post("Stop", `${runtime}_exited`);
+    await f.restart();
+    expect(f.state().activity).toBe("unknown");
+  });
+
+  it("restores nothing from a previous occupant's generation", async () => {
+    const f = fixture(runtime);
+    await f.runnerEvent({ type: "agent_end" });
+    // A successor occupant under the same session name, which hasn't posted yet.
+    f.sessions.updateStatus(f.session.id, "exited");
+    const successor = f.sessions.registerSession(f.node.id, f.session.sessionName, "handover");
+    f.sessions.updateStatus(successor.id, "running");
+    await f.restart();
+    expect(f.state()?.activity ?? "unknown").toBe("unknown");
+  });
+});
+
+describe("the daemon's own wiring", () => {
+  it("its sweep restores a pi seat's last recorded runner hook, so an idle seat reads idle with no new event", async () => {
+    const originalNoKernel = process.env.OPENRIG_NO_KERNEL;
+    process.env.OPENRIG_NO_KERNEL = "1";
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response(null, { status: 404 }));
+    let daemon: Awaited<ReturnType<typeof createDaemon>> | undefined;
+    try {
+      daemon = await createDaemon({ dbPath: ":memory:", tmuxExec: async () => "", cmuxExec: async () => "" } as Parameters<typeof createDaemon>[0]);
+      const { rigRepo, sessionRegistry, agentActivityStore, seatActivityService } = daemon.deps;
+      const rig = rigRepo.createRig("runner-restore");
+      const node = rigRepo.addNode(rig.id, "worker", { role: "worker", runtime: "pi" });
+      const sessionName = "worker@runner-restore";
+      const session = sessionRegistry.registerSession(node.id, sessionName);
+      sessionRegistry.updateStatus(session.id, "running");
+      const generation = sessionRegistry.currentOccupantTenure(node.id)!.generationUuid;
+      // Recorded before this daemon's oracle saw the seat, as after a restart.
+      agentActivityStore.recordHookEvent({ sessionName, nodeId: node.id, runtime: "pi", generation, hookEvent: "Stop", subtype: "agent_end" });
+      expect(seatActivityService.getSeatState(node.id)).toBeNull();
+      await seatActivityService.pollAllRunningTmuxSeats(daemon.db);
+      expect(seatActivityService.getSeatState(node.id)).toMatchObject({ activity: "idle-at-prompt", decidedBy: "lifecycle-hooks" });
+    } finally {
+      daemon?.eventLoopMonitor.stop();
+      daemon?.db.close();
+      fetch.mockRestore();
+      if (originalNoKernel === undefined) delete process.env.OPENRIG_NO_KERNEL;
+      else process.env.OPENRIG_NO_KERNEL = originalNoKernel;
+    }
   });
 });
 
