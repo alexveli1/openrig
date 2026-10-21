@@ -92,8 +92,8 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   window in production — never by fixture pass alone (symmetric admission: a fixture
   pass admits a rung to TRIAL, where it is measured but not consulted; production agreement
   promotes it). Undeclared and partial-coverage rungs are identity-only, which is also where
-  a degraded rung goes. For a pi or omp seat or a community harness, sampling is
-  positive-only: a changing pane reads working, and a quiet one never reads idle on its
+  a degraded rung goes, with one declared exception: for a pi or omp seat or a community
+  harness, sampling is positive-only: a changing pane reads working, and a quiet one never reads idle on its
   own, since the pane can be quiet mid-turn.
 - **pi and omp runner hooks**: OpenRig's runner reads the child's RPC event stream and posts
   each turn boundary (`agent_start`, `turn_start`, tool calls, `agent_end`; attention). These
@@ -106,7 +106,8 @@ time-bounded evidence. Rungs, top down, with each rung's retirement condition:
   posts again.
 
 Partial-coverage honesty: a source with partial lifecycle coverage gets identity-only
-trust. The ladder is also the migration path — new oracles slot in above existing
+trust, unless its inventory declares it positive-only. A positive-only source can report
+working and nothing else; its silence reads unknown, never idle. The ladder is also the migration path — new oracles slot in above existing
 heuristics, lower rungs retire a release at a time, consumers never see a flag day.
 
 Seat-keyed: state attaches to the durable seat nodeId, never the occupant. A handover or

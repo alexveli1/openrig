@@ -652,7 +652,8 @@ function missingSessionGuidance(node: NodeEntry): string | null {
 // SPEC-DECLARED model (nodes.model), NOT the model the seat is running. The
 // last observed native model is reported separately, with its provenance and time.
 /** One line per seat, except that a runtime's seats with no model reader share one line (#1680). It keeps every
- *  configured model with its count; `--full` and `--json` still give each seat's own. */
+ *  configured model with its count. Each seat's own configured model stays in `--full`'s MODEL(DECLARED) column and in
+ *  `--json`; the lines themselves collapse in every human view. */
 export function modelLines(nodes: NodeEntry[]): string[] {
   const lines: string[] = [];
   const unsupported = new Map<string, NodeEntry[]>();
