@@ -99,6 +99,9 @@ export interface RungDeclaration {
   lifecycleCoverage: "full" | "partial" | "none";
   /** The trust the rung STARTS with on this adapter (promotion may raise trial). */
   initialTrust: RungTrust;
+  /** Hooks only: the source sees every turn boundary in order, so its last one holds until the next instead of
+   *  expiring with the hook window. Only a runner that reads its child's whole event stream declares it. */
+  durableBoundaries?: true;
 }
 
 /** What an adapter declares about itself — arbitration ranks what each source can
@@ -106,7 +109,7 @@ export interface RungDeclaration {
  *  never inherits its predecessor's rung authority. */
 export interface AdapterRungInventory {
   adapterId: string;
-  runtime: "claude-code" | "codex" | "omp" | "tmux-generic" | "community-harness";
+  runtime: "claude-code" | "codex" | "pi" | "omp" | "tmux-generic" | "community-harness";
   rungs: RungDeclaration[];
 }
 
@@ -210,12 +213,24 @@ export const COMMUNITY_HARNESS_RUNG_INVENTORY: AdapterRungInventory = {
   rungs: [{ rung: "window-sampling", lifecycleCoverage: "partial", initialTrust: "positive-only" }],
 };
 
-/** omp (#1680): its runner's turn events don't staff a rung here, so a quiet pane can be mid-turn, waiting on the model or a
- *  long tool call. Window sampling is positive-only, as for a community harness: a quiet screen reads unknown, never idle. */
+/** pi and omp run under OpenRig's runner, which reads the child's RPC event stream and posts each turn boundary as a
+ *  hook (agent_start, turn_start, tool calls, agent_end; attention; process exit). Those hooks decide, and a boundary
+ *  holds until the next one. A quiet pane can be mid-turn, so window sampling stays positive-only. */
+const RUNNER_ACTIVITY_RUNGS: RungDeclaration[] = [
+  { rung: "lifecycle-hooks", lifecycleCoverage: "full", initialTrust: "authoritative", durableBoundaries: true },
+  { rung: "window-sampling", lifecycleCoverage: "partial", initialTrust: "positive-only" },
+];
+
+export const PI_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
+  adapterId: "pi-runtime-adapter",
+  runtime: "pi",
+  rungs: RUNNER_ACTIVITY_RUNGS,
+};
+
 export const OMP_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
   adapterId: "omp-runtime-adapter",
   runtime: "omp",
-  rungs: [{ rung: "window-sampling", lifecycleCoverage: "partial", initialTrust: "positive-only" }],
+  rungs: RUNNER_ACTIVITY_RUNGS,
 };
 
 /** Resolve a runtime string to its rung inventory (the ingest auto-declaration path).
@@ -224,6 +239,7 @@ export const OMP_ACTIVITY_RUNG_INVENTORY: AdapterRungInventory = {
 export function runtimeRungInventory(runtime: string | null, communityHarness?: string | null): AdapterRungInventory {
   if (runtime === "claude-code") return CLAUDE_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "codex") return CODEX_ACTIVITY_RUNG_INVENTORY;
+  if (runtime === "pi") return PI_ACTIVITY_RUNG_INVENTORY;
   if (runtime === "omp") return OMP_ACTIVITY_RUNG_INVENTORY;
   if (communityHarnessOf(communityHarness, runtime)) return COMMUNITY_HARNESS_RUNG_INVENTORY;
   return TMUX_GENERIC_RUNG_INVENTORY;

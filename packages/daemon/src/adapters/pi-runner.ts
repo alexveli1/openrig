@@ -218,6 +218,8 @@ export function mapPiEvent(event: Record<string, unknown>, runtime: RunnerRuntim
       // Pi keeps main's mapping: turn_end carries no notice.
       return runtime === "omp" ? { mirrorLines: [], ...modelErrorNotice(event, runtime) } : { mirrorLines: [] };
     case "turn_start":
+      // Some turn paths omit agent_start; turn_start still opens a turn, so it reports the seat working.
+      return { mirrorLines: [], activity: { hookEvent: "active", subtype: "turn_start" } };
     case "message_start":
       return { mirrorLines: [] };
     case "message_update": {

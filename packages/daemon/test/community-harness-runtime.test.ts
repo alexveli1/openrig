@@ -11,6 +11,7 @@ import {
   CLAUDE_ACTIVITY_RUNG_INVENTORY,
   CODEX_ACTIVITY_RUNG_INVENTORY,
   OMP_ACTIVITY_RUNG_INVENTORY,
+  PI_ACTIVITY_RUNG_INVENTORY,
   TMUX_GENERIC_RUNG_INVENTORY,
   runtimeRungInventory,
 } from "../src/domain/activity-taxonomy.js";
@@ -249,7 +250,8 @@ describe("activity for a community harness", () => {
   it("gives built-ins the inventories they had, and community harnesses their own", () => {
     expect(runtimeRungInventory("claude-code")).toBe(CLAUDE_ACTIVITY_RUNG_INVENTORY);
     expect(runtimeRungInventory("codex")).toBe(CODEX_ACTIVITY_RUNG_INVENTORY);
-    for (const runtime of ["pi", "terminal", "stub", null]) expect(runtimeRungInventory(runtime)).toBe(TMUX_GENERIC_RUNG_INVENTORY);
+    for (const runtime of ["terminal", "stub", null]) expect(runtimeRungInventory(runtime)).toBe(TMUX_GENERIC_RUNG_INVENTORY);
+    expect(runtimeRungInventory("pi")).toBe(PI_ACTIVITY_RUNG_INVENTORY);
     expect(runtimeRungInventory("omp")).toBe(OMP_ACTIVITY_RUNG_INVENTORY);
     // Only a seat launched for the app gets its inventory; a free-text runtime keeps the generic floor, as before.
     expect(runtimeRungInventory("synth", "synth")).toBe(COMMUNITY_HARNESS_RUNG_INVENTORY);

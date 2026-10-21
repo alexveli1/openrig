@@ -336,8 +336,15 @@ export function hookEventState(rawEvent: string | null | undefined, rawSubtype: 
     if (rawSubtype === "permission_prompt" || rawSubtype === "elicitation_dialog" || (seatRuntime === "omp" && rawSubtype === "runtime_error")) return "needs_input";
     return rawSubtype === "idle_prompt" ? "idle" : "unknown";
   }
+  // The runner posts Stop when its child process exits: nothing is at a prompt, so it isn't idle.
+  if (rawEvent === "Stop" && isRunnerExit(rawSubtype, seatRuntime)) return "unknown";
   if (rawEvent === "Stop" || rawEvent === "SessionEnd" || rawEvent === "stop" || rawEvent === "idle") return "idle";
   return "unknown";
+}
+
+/** The runner's Stop for its child's process exit (`pi_exited`, `omp_exited`), on that runtime's seat. */
+export function isRunnerExit(rawSubtype: string | null | undefined, seatRuntime: string | null): boolean {
+  return (seatRuntime === "pi" || seatRuntime === "omp") && rawSubtype === `${seatRuntime}_exited`;
 }
 
 /** A runtime hook that leaves the agent waiting on a person: an approval, a picker or an elicitation. */

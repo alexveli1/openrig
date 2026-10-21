@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { Hono, type Context } from "hono";
 import { streamSSE } from "hono/streaming";
 import type { AgentActivityStore } from "../domain/agent-activity-store.js";
+import { isRunnerExit } from "../domain/agent-activity-store.js";
 import type { SessionRegistry } from "../domain/session-registry.js";
 import type { EventBus } from "../domain/event-bus.js";
 import { verifyStartupProof } from "../domain/startup-proof.js";
@@ -49,6 +50,10 @@ export function evidenceFromHookActivity(input: {
   if (input.runtime === "claude-code" && input.activity.rawEvent === "Notification"
       && input.activity.reason === "permission_prompt") {
     return { ...base, permissionRequest: { id: "claude-permission-prompt" }, needsInput: { count: 1, reason: "permission_prompt" } };
+  }
+  // A runner's exit report clears what its last turn said: the seat is no longer at a prompt or mid-turn.
+  if (input.activity.rawEvent === "Stop" && isRunnerExit(input.activity.rawSubtype, input.runtime)) {
+    return { ...base, activity: "unknown", needsInput: { count: 0, reason: null } };
   }
   switch (input.activity.state) {
     case "running":

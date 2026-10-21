@@ -591,10 +591,16 @@ export class SeatActivityService {
       if (!evd || evd.activity === undefined) continue;
       // A positive-only rung answers only "working"; its silence leaves the state to the rungs below, or unknown.
       if (trust === "positive-only" && evd.activity !== "working") continue;
-      if (rung === "lifecycle-hooks" && nowMs - Date.parse(evd.observedAt) > HOOK_AUTHORITY_WINDOW_MS) continue;
+      if (rung === "lifecycle-hooks" && !this.durableBoundaries(seat, rung)
+          && nowMs - Date.parse(evd.observedAt) > HOOK_AUTHORITY_WINDOW_MS) continue;
       return evd;
     }
     return null;
+  }
+
+  /** Whether the seat's declared inventory says this rung's last boundary holds until the next one. */
+  private durableBoundaries(seat: SeatLadderState, rung: EvidenceRungId): boolean {
+    return seat.inventory?.rungs.some((r) => r.rung === rung && r.durableBoundaries === true) ?? false;
   }
 
   private emitRungHealth(
