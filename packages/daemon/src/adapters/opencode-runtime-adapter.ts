@@ -654,11 +654,17 @@ export class OpencodeRuntimeAdapter implements RuntimeAdapter {
     return { ok: true, command, core: command };
   }
 
-  /** Type a command buildResumeCommand built into the pane's shell, then verify the resume as
-   *  launchHarness does. Nothing is decided again, so the command runs exactly as it was built. */
+  /** Type the resume command buildResumeCommand built directly into the pane's shell, then verify the
+   *  resume as launchHarness does. This mirrors the production opencode resume-launch send (sendText +
+   *  Enter, NOT staged /bin/sh): opencode becomes the pane's own foreground process, so verifyLaunch's
+   *  "runtime owns the pane" readiness — the same signal a normal resume launch relies on — holds after
+   *  the relaunch. Staging via /bin/sh would leave a wrapper shell as the pane foreground and never verify.
+   *  Nothing is decided again, so the command runs exactly as it was built. */
   async sendResumeCommand(tmuxSession: string, command: string, _resumeToken: string): Promise<HarnessLaunchResult> {
-    const textResult = await this.tmux.sendShellCommand(tmuxSession, command);
+    const textResult = await this.tmux.sendText(tmuxSession, command);
     if (!textResult.ok) return { ok: false, error: `Failed to send launch command: ${textResult.message}` };
+    const enterResult = await this.tmux.sendKeys(tmuxSession, ["Enter"]);
+    if (!enterResult.ok) return { ok: false, error: `Failed to send Enter: ${enterResult.message}` };
     return this.verifyLaunch(tmuxSession, true);
   }
 

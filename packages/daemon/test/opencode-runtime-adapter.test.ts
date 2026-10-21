@@ -652,15 +652,27 @@ describe("opencode capture and preflight", () => {
 
 // ── in-place restart resume surface (buildResumeCommand / sendResumeCommand / verifyResumeInPane) ──
 
-function launcherTmux(opts: { shellCommandFails?: boolean; paneReady?: boolean } = {}) {
-  const sendShellCommand = vi.fn(async (_t: string, _c: string) =>
-    opts.shellCommandFails ? { ok: false, message: "send failed" } : { ok: true });
+function launcherTmux(opts: { textSendFails?: boolean; enterFails?: boolean; paneReady?: boolean } = {}) {
+  // The relaunch must type the command the SAME way a production opencode resume launch does:
+  // sendText + Enter, so opencode becomes the pane's own foreground (NOT staged via /bin/sh, which
+  // leaves a wrapper shell owning the pane and never verifies). sendShellCommand is intentionally
+  // absent here: if the adapter called it, this mock would throw and the test would fail.
+  const sendText = vi.fn(async (_t: string, _c: string) =>
+    opts.textSendFails ? { ok: false, message: "send failed" } : { ok: true });
+  const sendKeys = vi.fn(async (_t: string, _keys: string[]) =>
+    opts.enterFails ? { ok: false, message: "enter failed" } : { ok: true });
   return {
-    sendShellCommand,
+    sendText,
+    sendKeys,
     getPaneCommand: vi.fn(async () => (opts.paneReady === false ? "bash" : "opencode")),
     capturePaneContent: vi.fn(async () => ""),
   } as unknown as TmuxAdapter;
 }
+
+const launcherCalls = (tmux: unknown) => tmux as unknown as {
+  sendText: { mock: { calls: unknown[][] } };
+  sendKeys: { mock: { calls: unknown[][] } };
+};
 
 describe("OpencodeRuntimeAdapter — in-place restart resume surface", () => {
   const binding = { nodeId: "n1", tmuxSession: SESSION, tmuxPane: "%7", cwd: "/work" } as unknown as Parameters<OpencodeRuntimeAdapter["buildResumeCommand"]>[0];
@@ -681,17 +693,24 @@ describe("OpencodeRuntimeAdapter — in-place restart resume surface", () => {
     expect(res.ok).toBe(false);
   });
 
-  it("sendResumeCommand types the built command into the shell and verifies the resume", async () => {
+  it("sendResumeCommand types the command with sendText + Enter (like a resume launch) and verifies the resume", async () => {
     const tmux = launcherTmux();
     const adapter = adapterWith(memFs(), tmux);
     const res = await adapter.sendResumeCommand(SESSION, `cd '/work' && opencode --session '${SESSION_ID}'`, SESSION_ID);
     expect(res.ok).toBe(true);
-    expect((tmux as unknown as { sendShellCommand: { mock: { calls: unknown[][] } } }).sendShellCommand.mock.calls[0]?.[1])
-      .toBe(`cd '/work' && opencode --session '${SESSION_ID}'`);
+    const calls = launcherCalls(tmux);
+    expect(calls.sendText.mock.calls[0]?.[1]).toBe(`cd '/work' && opencode --session '${SESSION_ID}'`);
+    expect(calls.sendKeys.mock.calls.some((c) => c[1]?.includes("Enter"))).toBe(true);
   });
 
-  it("sendResumeCommand fails when the shell send fails", async () => {
-    const adapter = adapterWith(memFs(), launcherTmux({ shellCommandFails: true }));
+  it("sendResumeCommand fails when the sendText send fails", async () => {
+    const adapter = adapterWith(memFs(), launcherTmux({ textSendFails: true }));
+    const res = await adapter.sendResumeCommand(SESSION, "cmd", SESSION_ID);
+    expect(res.ok).toBe(false);
+  });
+
+  it("sendResumeCommand fails when Enter fails", async () => {
+    const adapter = adapterWith(memFs(), launcherTmux({ enterFails: true }));
     const res = await adapter.sendResumeCommand(SESSION, "cmd", SESSION_ID);
     expect(res.ok).toBe(false);
   });
