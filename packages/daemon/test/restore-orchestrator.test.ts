@@ -3534,6 +3534,51 @@ describe("RestoreOrchestrator", () => {
     expect(result.result.warnings.some((w) => w.includes("stale-skill") || w.includes(missingEntry))).toBe(true);
   });
 
+  it("a missing required startup file holds only its own seat; the rest of the rig restores", async () => {
+    const tmux = mockTmux();
+    const snap = seedRigAndSnapshot({
+      nodes: [
+        { logicalId: "agent-a", role: "worker", runtime: "claude-code" },
+        { logicalId: "agent-b", role: "worker", runtime: "claude-code" },
+      ],
+      resumeType: "none",
+      edges: [],
+    });
+    const nodeA = snap.data.nodes.find((n) => n.logicalId === "agent-a")!;
+    const missingPath = "/tmp/openrig-missing-required-startup-agent-a.md";
+    const snapshot = updateSnapshotData(snap, (data) => {
+      data.nodeStartupContext[nodeA.id] = {
+        projectionEntries: [],
+        resolvedStartupFiles: [{
+          path: "startup.md", absolutePath: missingPath, ownerRoot: "/tmp",
+          deliveryHint: "guidance_merge", required: true, appliesOn: ["restore"],
+        }],
+        startupActions: [],
+        runtime: "claude-code",
+      };
+    });
+
+    const result = await createOrchestrator({ tmux }).restore(snapshot.id, {
+      fsOps: { exists: (p) => p !== missingPath },
+      freshLogicalIds: ["agent-a", "agent-b"],
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.result.rigResult).toBe("partially_restored");
+    const a = result.result.nodes.find((n) => n.logicalId === "agent-a")!;
+    const b = result.result.nodes.find((n) => n.logicalId === "agent-b")!;
+    expect(a.status).toBe("failed");
+    expect(a.error).toContain("Not launched");
+    expect(a.error).toContain(missingPath);
+    expect(a.error).toContain("Restore the missing startup file");
+    expect(b.status).not.toBe("failed");
+    // The held seat never got a session; the other seat did.
+    const created = vi.mocked(tmux.createSession).mock.calls.map((call) => String(call[0]));
+    expect(created.some((name) => name.includes("agent-a"))).toBe(false);
+    expect(created.some((name) => name.includes("agent-b"))).toBe(true);
+  });
+
   it("OPR.0.3.4.5 (09): missing REQUIRED startup file STILL fails (preserve the genuinely-fatal blocker)", async () => {
     const snap = seedRigAndSnapshot({
       nodes: [{ logicalId: "agent-a", role: "worker", runtime: "claude-code" }],
