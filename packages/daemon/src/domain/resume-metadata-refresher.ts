@@ -35,7 +35,7 @@ export interface ResumeRefreshSession {
   /** Same value, the name used by registry-derived sessions
    *  (`getLatestLiveSessions` exposes `createdAt`, not `sessionCreatedAt`).
    *  The refresher prefers `sessionCreatedAt` and falls back to this,
-   *  so both construction sites bound store reads (deepcool dist patch,
+   *  so both construction sites bound store reads (dist-patched runtime,
    *  2026-10-04). */
   createdAt?: string | null;
 }

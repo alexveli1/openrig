@@ -99,7 +99,7 @@ function adapterWith(
 
 // ── command builders ────────────────────────────────────────────────────────
 
-describe("opencode command builders (form, ported from deepcool dist 2026-10-13)", () => {
+describe("opencode command builders (form, verified against the opencode 2.x CLI)", () => {
   it("builds the fresh command as `cd '<cwd>' && opencode` with no model/posture emission", () => {
     const cmd = buildOpencodeFreshCommand({ cwd: "/work", model: "anthropic/claude-sonnet-4-5", postureArg: " --auto" });
     expect(cmd).toBe("cd '/work' && opencode");

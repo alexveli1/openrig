@@ -2,7 +2,7 @@
 //
 // Unlike Pi (which needs the pane-hosted pi-runner to front `pi --mode rpc`),
 // opencode exposes session resume/attach primitives directly on its CLI
-// (form, verified on deepcool 2026-10-13: per-seat agent profiles carry
+// (form, verified against the opencode 2.x CLI: per-seat agent profiles carry
 // the model + the `permission: {"*":"allow"}` that removes `--auto`; the
 // profile is resolved from the seat cwd's `opencode.json` `default_agent`
 // — NOT a CLI flag; `--prompt` and resume are opt-in):
@@ -99,7 +99,7 @@ export interface OpencodeLaunchOpts {
 }
 
 /** Fresh seat command: `cd '<cwd>' && opencode [--prompt <brief>]`
- *  (form, verified on deepcool 2026-10-13: no positional project, no --model,
+ *  (form, verified against the opencode 2.x CLI: no positional project, no --model,
  *  no --auto, no --agent — the per-seat agent profile is resolved from the
  *  seat cwd's `opencode.json` `default_agent`, not a CLI flag). */
 export function buildOpencodeFreshCommand(
@@ -164,10 +164,9 @@ export function defaultOpencodeDbPath(homedir?: string): string {
 }
 
 /** `opencode` binary for a seat (-form CLI). `opencode.bin` is the runtime's
- *  launcher shim on the deepcool fleet (per-seat `opencode-agent-map.json`
- *  installs it next to the TUI launcher); accepted by readiness/resume
- *  probes. Typed launches use the plain `opencode` name so the managed
- *  surface stays the TUI the profile expects. */
+ *  launcher shim some deployments install next to the TUI launcher; accepted by
+ *  readiness/resume probes. Typed launches use the plain `opencode` name so the
+ *  managed surface stays the TUI the profile expects. */
 function opencodeBinary(): string {
   return process.env.OPENRIG_OPENCODE_BINARY?.trim() || "opencode";
 }
