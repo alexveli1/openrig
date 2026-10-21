@@ -45,3 +45,4 @@ packages/daemon/context-packs/
 
 # Internal build receipts; never commit
 /.evidence/
+tmp/
