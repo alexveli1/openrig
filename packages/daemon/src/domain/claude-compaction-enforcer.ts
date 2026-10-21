@@ -53,6 +53,11 @@ export const POST_COMPACT_RESTORE_COOLDOWN_MS_DEFAULT = 10 * 60_000;
 export const MANUAL_PREP_WAIT_MS_DEFAULT = 180_000;
 // Operational ceiling, not a measured optimum. Existing context polls advance auto preparation.
 export const AUTO_PREP_WAIT_MS_DEFAULT = 25 * 60_000;
+// How long a stopped attempt holds automatic compaction off for its seat before a fresh attempt may begin. Without it one
+// failed preparation turned automatic compaction off for the seat until someone noticed. Operational, not measured.
+export const AUTO_RETRY_AFTER_STOP_MS_DEFAULT = 10 * 60_000;
+// An explicit cancel is a decision about this seat, not a failure, so it is never retried automatically.
+const CANCEL_REASONS = new Set(["preparation_cancelled", "compaction_cancelled"]);
 const PREP_SEND_ATTEMPTS_MAX = 3;
 // Slices 13–14 fix — each post-compact back-half send (turn_boundary → restore →
 // audit) is idle-gated so it cannot be injected into the busy pane right after
@@ -421,6 +426,8 @@ interface PreparationAttempt extends PreparationState {
   controller: AbortController;
   /** The policy's compaction instruction when the attempt began; the /compact command uses this one. */
   compactInstruction: string;
+  /** When the attempt stopped (this.now()); automatic compaction may begin a fresh one after the retry cooldown. */
+  stoppedAt?: number;
 }
 
 /** What the restore request must carry because the /compact command could not. With --skip-map the attempt
@@ -432,6 +439,7 @@ export class ClaudeCompactionEnforcer {
   private readonly sessionTransport: SessionTransport;
   private readonly dedupWindowMs: number;
   private readonly postCompactRestoreCooldownMs: number;
+  private readonly autoRetryAfterStopMs: number;
   private readonly openrigHome: string;
   // OPR.0.4.3.14 — max time to wait for the manual prep turn to complete (seat
   // idle) before sending /compact. Bounds the two-phase wait-for-idle.
@@ -469,6 +477,7 @@ export class ClaudeCompactionEnforcer {
       dedupWindowMs?: number;
       openrigHome?: string;
       postCompactRestoreCooldownMs?: number;
+      autoRetryAfterStopMs?: number;
       manualPrepWaitMs?: number;
       now?: () => number;
       sleep?: (ms: number) => Promise<void>;
@@ -487,6 +496,7 @@ export class ClaudeCompactionEnforcer {
     this.sessionTransport = sessionTransport;
     this.dedupWindowMs = opts?.dedupWindowMs ?? DEDUP_WINDOW_MS_DEFAULT;
     this.postCompactRestoreCooldownMs = opts?.postCompactRestoreCooldownMs ?? POST_COMPACT_RESTORE_COOLDOWN_MS_DEFAULT;
+    this.autoRetryAfterStopMs = opts?.autoRetryAfterStopMs ?? AUTO_RETRY_AFTER_STOP_MS_DEFAULT;
     this.openrigHome = opts?.openrigHome ?? defaultOpenRigHome();
     this.manualPrepWaitMs = opts?.manualPrepWaitMs ?? MANUAL_PREP_WAIT_MS_DEFAULT;
     this.now = opts?.now ?? (() => Date.now());
@@ -772,6 +782,13 @@ export class ClaudeCompactionEnforcer {
     }
 
     let attempt = this.pendingPreCompactPrep.get(input.sessionName);
+    // A stopped attempt, automatic or manual, gives way to a fresh automatic one once the retry cooldown has passed. The
+    // cooldown keeps a seat that can't finish a map from getting a preparation prompt on every poll.
+    if (attempt?.status === "stopped" && attempt.stoppedAt !== undefined && !CANCEL_REASONS.has(attempt.reason ?? "")
+      && this.now() - attempt.stoppedAt >= this.autoRetryAfterStopMs) {
+      this.pendingPreCompactPrep.delete(input.sessionName);
+      attempt = undefined;
+    }
     if (attempt?.mode === "manual") return { triggered: false, reason: "preparation_pending" };
     if (attempt?.status === "stopped") return { triggered: false, reason: "preparation_stopped" };
     if (!attempt) {
@@ -1076,7 +1093,7 @@ export class ClaudeCompactionEnforcer {
   private stopPreparation(session: string, reason: string, expected?: PreparationAttempt): void {
     const attempt = this.pendingPreCompactPrep.get(session);
     if ((expected && expected !== attempt) || !attempt || attempt.status === "stopped" || attempt.status === "compact-sent") return;
-    attempt.status = "stopped"; attempt.reason = reason; attempt.controller.abort();
+    attempt.status = "stopped"; attempt.reason = reason; attempt.stoppedAt = this.now(); attempt.controller.abort();
     if (attempt.mode === "manual") this.setManualStage(session, "skipped-or-failed", reason);
   }
 
@@ -1103,7 +1120,7 @@ export class ClaudeCompactionEnforcer {
     this.reconcilePreparations();
     const attempt = this.pendingPreCompactPrep.get(session);
     if (!attempt) return null;
-    const { controller: _controller, sends: _sends, policyWasEnabled: _enabled, compactInstruction: _instruction, ...state } = attempt;
+    const { controller: _controller, sends: _sends, policyWasEnabled: _enabled, compactInstruction: _instruction, stoppedAt: _stoppedAt, ...state } = attempt;
     return state;
   }
 
